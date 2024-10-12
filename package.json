@@ -23,6 +23,8 @@
     "android",
     "ios",
     "cpp",
+    "crypto",
+    "vendor",
     "*.podspec",
     "!ios/build",
     "!android/build",
