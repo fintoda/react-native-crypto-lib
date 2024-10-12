@@ -5,6 +5,7 @@
   "source": "./src/index.ts",
   "main": "./lib/commonjs/index.js",
   "module": "./lib/module/index.js",
+  "private": false,
   "exports": {
     ".": {
       "import": {
@@ -62,7 +63,8 @@
   },
   "homepage": "https://github.com/fintoda/react-native-crypto-lib#readme",
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@commitlint/config-conventional": "^17.0.2",
