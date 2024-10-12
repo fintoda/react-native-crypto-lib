@@ -10,7 +10,7 @@ import {
   aes,
   schnorr,
   ecc,
-} from 'react-native-crypto-lib';
+} from '@fintoda/react-native-crypto-lib';
 import * as bitcoinjs from 'bitcoinjs-lib';
 
 bitcoinjs.initEccLib(ecc);

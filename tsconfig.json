@@ -2,7 +2,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "react-native-crypto-lib": ["./src/index"]
+      "@fintoda/react-native-crypto-lib": ["./src/index"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,

@@ -44,9 +44,9 @@ This module is a native wrapper for cryptographic functions, leveraging **Trezor
 ## Installation
 
 ```sh
-npm install react-native-crypto-lib
+npm install @fintoda/react-native-crypto-lib
 # or
-yarn add react-native-crypto-lib
+yarn add @fintoda/react-native-crypto-lib
 ```
 
 ## Usage
@@ -54,7 +54,7 @@ yarn add react-native-crypto-lib
 
 ```js
 import { Buffer } from 'buffer';
-import { digest } from 'react-native-crypto-lib';
+import { digest } from '@fintoda/react-native-crypto-lib';
 
 // ...
 
