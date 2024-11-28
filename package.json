@@ -162,6 +162,7 @@
     "source": "src",
     "output": "lib",
     "targets": [
+      "codegen",
       [
         "commonjs",
         {
@@ -182,6 +183,19 @@
         }
       ]
     ]
+  },
+  "codegenConfig": {
+    "name": "RNCryptoLibSpec",
+    "type": "all",
+    "jsSrcsDir": "src",
+    "outputDir": {
+      "ios": "ios/generated",
+      "android": "android/generated"
+    },
+    "android": {
+      "javaPackageName": "com.cryptolib"
+    },
+    "includesGeneratedCode": true
   },
   "create-react-native-library": {
     "type": "module-legacy",
