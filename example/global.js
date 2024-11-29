@@ -1,3 +1,7 @@
-import { Buffer } from 'buffer';
+if (!global.Buffer) {
+  global.Buffer = require('buffer').Buffer;
+}
 
-global.Buffer = Buffer;
+if (!global.BigInt) {
+  global.BigInt = require('big-integer');
+}

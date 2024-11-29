@@ -2,7 +2,12 @@ import { NativeModules } from 'react-native';
 import { createHash, HASH } from './digest';
 import { base64Decode, base64Encode } from './utils';
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
+
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 type SignResult = {
   signature: Uint8Array;

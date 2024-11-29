@@ -1,10 +1,15 @@
 import { NativeModules } from 'react-native';
 import { base64Decode } from './utils';
 
-const CryptoLib = NativeModules.CryptoLib;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
 
-export const randomNumber: () => Promise<number> = CryptoLib.randomNumber;
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
+
+export const randomNumber: () => Promise<number> = CryptoLibNative.randomNumber;
 
 export const randomBytes = async (length: number): Promise<Uint8Array> => {
-  return base64Decode(await CryptoLib.randomBytes(length));
+  return base64Decode(await CryptoLibNative.randomBytes(length));
 };

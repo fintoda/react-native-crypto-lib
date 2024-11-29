@@ -22,7 +22,7 @@ Pod::Spec.new do |s|
                     "vendor/secp256k1-zkp/src/precomputed_ecmult.c",
                     "vendor/secp256k1-zkp/src/precomputed_ecmult_gen.c",
                     "vendor/secp256k1-zkp/src/secp256k1.c"
-  
+
   s.compiler_flags = secp256k1_compiler_flags
 
   # Use install_modules_dependencies helper to install the dependencies if React Native version >=0.71.0.

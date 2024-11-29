@@ -1,29 +1,13 @@
 import { NativeModules } from 'react-native';
 import { base64Encode } from './utils';
+import type { Bip32Curve, HDNode } from './types';
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
 
-export type Bip32Curve =
-  | 'secp256k1'
-  | 'secp256k1-decred'
-  | 'secp256k1-groestl'
-  | 'secp256k1-smart'
-  | 'nist256p1'
-  | 'ed25519'
-  | 'ed25519-sha3'
-  | 'ed25519-keccak'
-  | 'curve25519';
-
-export type HDNode = {
-  depth: number;
-  child_num: number;
-  chain_code: string;
-  private_key?: string;
-  public_key?: string;
-  fingerprint: number;
-  curve: Bip32Curve;
-  private_derive: boolean;
-};
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 const HIGHEST_BIT = 0x80000000;
 const UINT31_MAX = Math.pow(2, 31) - 1;

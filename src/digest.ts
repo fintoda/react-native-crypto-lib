@@ -24,7 +24,12 @@ export enum PBKDF2_HASH {
   SHA512 = 2,
 }
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
+
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 export const createHash = (type: HASH, data: Uint8Array): Uint8Array => {
   return base64Decode(CryptoLibNative.hash(type, base64Encode(data)));

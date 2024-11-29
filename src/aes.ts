@@ -6,7 +6,12 @@ export enum PADDING_MODE {
   PKCS7 = 1,
 }
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
+
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 export async function encrypt(
   key: Uint8Array,

@@ -11,6 +11,7 @@
 #include "hmac.h"
 #include "pbkdf2.h"
 #include "bip39.h"
+#include "bip32.h"
 #include "ecdsa.h"
 #include "secp256k1.h"
 #include "bignum.h"
@@ -138,6 +139,29 @@ namespace cryptolib {
 
 	int validateMnemonic(const char *mnemonic) {
 		return mnemonic_check(mnemonic);
+	}
+
+	int hdNodeDerive(HDNode *node, bool private_derive, size_t pathSize, uint32_t *path) {
+		int success = 0;
+  
+		for (int i = 0; i < (int)pathSize; i++) {
+			uint32_t index = path[i];
+			
+			if (private_derive) {
+				success = hdnode_private_ckd(node, index);
+				if (success == 1) {
+					hdnode_fill_public_key(node);
+				}
+			} else {
+				success = hdnode_public_ckd(node, index);
+			}
+			
+			if (success != 1) {
+				return success;
+			}
+		}
+
+		return success;
 	}
 
 	void ecdsaRandomPrivate(uint8_t *pk) {

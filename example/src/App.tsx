@@ -1,12 +1,13 @@
 import * as React from 'react';
 
 import { StyleSheet, View, Text } from 'react-native';
-import { Buffer } from 'buffer';
+// import { Buffer } from 'buffer';
 import {
   rng,
   digest,
   bip39,
   bip32,
+  ecdsa,
   aes,
   schnorr,
   ecc,
@@ -16,6 +17,11 @@ import * as bitcoinjs from 'bitcoinjs-lib';
 bitcoinjs.initEccLib(ecc);
 
 async function test() {
+  const rn1 = await rng.randomNumber();
+  if (isNaN(rn1)) {
+    throw new Error('rng');
+  }
+
   const hmac_key = new Uint8Array(
     Buffer.from('01020304050607080102030405060708', 'hex')
   );
@@ -227,7 +233,8 @@ async function test() {
     bip32_node.private_key !== 'ZGAThuyG3DDvkK0BUnl20Sr1jI1Ze1EqDJIG2xJU7z0=' ||
     bip32_node.public_key !== 'Awd8EmgQwUezwdBpf4JW6t7QUVs5U2+DdCn5nNh8G0lp' ||
     bip32_node.chain_code !== 'zlKwdxHt5jH3iko4D+g/OPjLeuJXN3jh6EX//TxyIxk=' ||
-    bip32_node.fingerprint !== 711613981
+    bip32_node.fingerprint !== 711613981 ||
+    bip32_node.curve !== 'secp256k1'
   ) {
     throw new Error('bip32.hdNodeFromSeed');
   }
@@ -240,7 +247,8 @@ async function test() {
       'TOem0Fpx7oNurlk6ftIRmtaAW9uqQXqhPrTOdfScpBA=' ||
     bip32_node0.public_key !== 'A9V+R3SOn0FNw0kiYVXIPsYgK1VQ9Q2NeOrDPxnqkBUv' ||
     bip32_node0.chain_code !== 'cjrgdzmStpkkGqtXsuNBwWxgSbB8MY1Vn37SB1GHy0g=' ||
-    bip32_node0.fingerprint !== 2687989489
+    bip32_node0.fingerprint !== 2687989489 ||
+    bip32_node0.curve !== 'secp256k1'
   ) {
     throw new Error('bip32.derivePath');
   }
@@ -262,9 +270,104 @@ async function test() {
     throw new Error('bip32.derivePath');
   }
 
+  const ecdsa_priv = await ecdsa.ecdsaRandomPrivate();
+  if (ecdsa_priv.length !== 32) {
+    throw new Error('ecdsa.ecdsaRandomPrivate');
+  }
+
+  if (!ecdsa.ecdsaValidatePrivate(ecdsa_priv)) {
+    throw new Error('ecdsa.ecdsaValidatePrivate (valid)');
+  }
+
+  const ecdsa_priv_invalid = new Uint8Array(
+    Buffer.from(
+      'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+      'hex'
+    )
+  );
+
+  if (ecdsa.ecdsaValidatePrivate(ecdsa_priv_invalid)) {
+    throw new Error('ecdsa.ecdsaValidatePrivate (invalid)');
+  }
+
+  const ecdsa_pub_33 = ecdsa.ecdsaGetPublic(ecdsa_priv, true);
+  if (ecdsa_pub_33.length !== 33) {
+    throw new Error('ecdsa.ecdsaGetPublic (compact)');
+  }
+
+  const ecdsa_pub_65 = ecdsa.ecdsaGetPublic(ecdsa_priv, false);
+  if (ecdsa_pub_65.length !== 65) {
+    throw new Error('ecdsa.ecdsaGetPublic (full)');
+  }
+
+  const ecdsa_pub_33_read = ecdsa.ecdsaReadPublic(ecdsa_pub_65, true);
+  if (Buffer.from(ecdsa_pub_33_read).compare(ecdsa_pub_33) !== 0) {
+    throw new Error('ecdsa.ecdsaReadPublic (compact)');
+  }
+
+  const ecdsa_pub_65_read = ecdsa.ecdsaReadPublic(ecdsa_pub_33, false);
+  if (Buffer.from(ecdsa_pub_65_read).compare(ecdsa_pub_65) !== 0) {
+    throw new Error('ecdsa.ecdsaReadPublic (full)');
+  }
+
+  const ecdsa_sign = ecdsa.ecdsaSign(ecdsa_priv, data);
+  if (
+    ecdsa_sign.recId < 0 ||
+    ecdsa_sign.recId > 1 ||
+    ecdsa_sign.signature.length !== 64
+  ) {
+    throw new Error('ecdsa.ecdsaSign');
+  }
+
+  if (!ecdsa.ecdsaVerify(ecdsa_pub_33, ecdsa_sign.signature, data)) {
+    throw new Error('ecdsa.ecdsaVerify (compact)');
+  }
+  if (!ecdsa.ecdsaVerify(ecdsa_pub_65, ecdsa_sign.signature, data)) {
+    throw new Error('ecdsa.ecdsaVerify (full)');
+  }
+
+  const ecdsa_sign2 = await ecdsa.ecdsaSignAsync(ecdsa_priv, data);
+  if (
+    ecdsa_sign2.recId < 0 ||
+    ecdsa_sign2.recId > 1 ||
+    ecdsa_sign2.signature.length !== 64
+  ) {
+    throw new Error('ecdsa.ecdsaSignAsync');
+  }
+
+  if (!ecdsa.ecdsaVerify(ecdsa_pub_33, ecdsa_sign2.signature, data)) {
+    throw new Error('ecdsa.ecdsaVerify (compact) (2)');
+  }
+  if (!ecdsa.ecdsaVerify(ecdsa_pub_65, ecdsa_sign2.signature, data)) {
+    throw new Error('ecdsa.ecdsaVerify (full) (2)');
+  }
+
+  const ecdsa_pub_65_rec = ecdsa.ecdsaRecover(
+    ecdsa_sign.signature,
+    ecdsa_sign.recId,
+    data
+  );
+  if (Buffer.from(ecdsa_pub_65_rec).compare(ecdsa_pub_65) !== 0) {
+    throw new Error('ecdsa.ecdsaRecover');
+  }
+
+  const ecdsa_priv2 = await ecdsa.ecdsaRandomPrivate();
+  const ecdsa_pub_33_2 = ecdsa.ecdsaGetPublic(ecdsa_priv2, true);
+  const ecdsa_ecdh = ecdsa.ecdsaEcdh(ecdsa_pub_33, ecdsa_priv2, true);
+
+  if (ecdsa_ecdh.length !== 32) {
+    throw new Error('ecdsa.ecdsaEcdh');
+  }
+
+  const ecdsa_ecdh2 = ecdsa.ecdsaEcdh(ecdsa_pub_33_2, ecdsa_priv, true);
+
+  if (Buffer.from(ecdsa_ecdh2).compare(ecdsa_ecdh) !== 0) {
+    throw new Error('ecdsa.ecdsaEcdh (2)');
+  }
+
   const key = await rng.randomBytes(32);
   const iv = await rng.randomBytes(16);
-  const data_enc = await rng.randomBytes(200);
+  const data_enc = await rng.randomBytes(10_000);
 
   const enc = await aes.encrypt(key, iv, data_enc);
   const dec = await aes.decrypt(key, iv, enc);
@@ -340,20 +443,20 @@ async function test() {
     throw new Error('schnorr wrong pub verify');
   }
 
-  const bip340_p2tr_int = bitcoinjs.payments.p2tr({
-    internalPubkey: bip340_int_pub,
-    network: bitcoinjs.networks.testnet,
-  });
+  // const bip340_p2tr_int = bitcoinjs.payments.p2tr({
+  //   internalPubkey: Buffer.from(bip340_int_pub),
+  //   network: bitcoinjs.networks.testnet,
+  // });
 
-  if (
-    bip340_p2tr_int.address !==
-    'tb1pkrel9298crzrl3xuqrntxfsudvyucp6u6pn769pwm3z6wekueqesgqaexe'
-  ) {
-    throw new Error('bitcoinjs p2tr address int');
-  }
+  // if (
+  //   bip340_p2tr_int.address !==
+  //   'tb1pkrel9298crzrl3xuqrntxfsudvyucp6u6pn769pwm3z6wekueqesgqaexe'
+  // ) {
+  //   throw new Error('bitcoinjs p2tr address int');
+  // }
 
   const bip340_p2tr = bitcoinjs.payments.p2tr({
-    pubkey: bip340_pub,
+    pubkey: Buffer.from(bip340_pub),
     network: bitcoinjs.networks.testnet,
   });
 

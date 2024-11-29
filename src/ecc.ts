@@ -3,22 +3,14 @@ import { NativeModules } from 'react-native';
 import * as ecdsa from './ecdsa';
 import * as schnorr from './schnorr';
 import { base64Decode, base64Encode } from './utils';
+import type { TinySecp256k1Interface, XOnlyPointAddTweakResult } from './types';
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
 
-export interface XOnlyPointAddTweakResult {
-  parity: 1 | 0;
-  xOnlyPubkey: Uint8Array;
-}
-
-export interface TinySecp256k1Interface {
-  isPoint(p: Uint8Array): boolean;
-  isXOnlyPoint(p: Uint8Array): boolean;
-  xOnlyPointAddTweak(
-    p: Uint8Array,
-    tweak: Uint8Array
-  ): XOnlyPointAddTweakResult | null;
-}
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 export default {
   isPoint: (pub: Uint8Array): boolean => {

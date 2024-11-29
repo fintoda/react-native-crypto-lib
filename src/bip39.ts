@@ -1,7 +1,12 @@
 import { NativeModules } from 'react-native';
 import { base64Decode } from './utils';
 
-const { CryptoLib: CryptoLibNative } = NativeModules;
+// @ts-expect-error
+const isTurboModuleEnabled = global.__turboModuleProxy != null;
+
+const CryptoLibNative = isTurboModuleEnabled
+  ? require('./NativeCryptoLib').default
+  : NativeModules.CryptoLib;
 
 export const mnemonicToSeed = (
   mnemonic: string,

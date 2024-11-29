@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "bip32.h"
+
 enum HASH_TYPE {
   SHA1,
   SHA256,
@@ -61,6 +63,9 @@ namespace cryptolib {
   void mnemonicToSeed(const char *mnemonic, const char *passphrase, uint8_t *seed);
   const char *generateMnemonic(int strength);
   int validateMnemonic(const char *mnemonic);
+
+  // bip32
+  int hdNodeDerive(HDNode *node, bool private_derive, size_t pathSize, uint32_t *path);
 
   // ECDSA
   void ecdsaRandomPrivate(uint8_t *pk);

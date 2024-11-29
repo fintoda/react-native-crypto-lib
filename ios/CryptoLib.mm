@@ -12,18 +12,17 @@
 @implementation CryptoLib
 RCT_EXPORT_MODULE()
 
-RCT_REMAP_METHOD(randomNumber,
-                 withResolver:(RCTPromiseResolveBlock)resolve
-                 withRejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXPORT_METHOD(
+  randomNumber:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject)
 {
   NSNumber *result = @(cryptolib::randomNumber());
-
   resolve(result);
 }
 
-RCT_EXPORT_METHOD(randomBytes:(int)length 
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXPORT_METHOD(randomBytes:(double)length 
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
 {
   uint8_t *bytes = (uint8_t *) malloc(length);
   cryptolib::randomBytes(bytes, length);
@@ -35,16 +34,16 @@ RCT_EXPORT_METHOD(randomBytes:(int)length
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
-  hash:(int)algorithm
-  withData:(NSString *)data)
-{
+  hash:(double)algorithm
+  data:(NSString *)data
+) {
   NSData *raw_data = [[NSData alloc]initWithBase64EncodedString:data options:0];
 
   size_t hashSize = 0;
   uint8_t *hash;
   NSData *result;
 
-  switch(algorithm){
+  switch((HASH_TYPE) algorithm){
     case SHA1:
     case RIPEMD160:
     case HASH160:
@@ -76,10 +75,10 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
-  hmac:(int)algorithm
-  withKey:(NSString *)key
-  withData:(NSString *)data)
-{
+  hmac:(double)algorithm
+  key:(NSString *)key
+  data:(NSString *)data
+) {
   NSData *raw_key = [[NSData alloc]initWithBase64EncodedString:key options:0];
   NSData *raw_data = [[NSData alloc]initWithBase64EncodedString:data options:0];
 
@@ -87,7 +86,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   uint8_t *hash;
   NSData *result;
 
-  switch(algorithm){
+  switch((HASH_TYPE) algorithm){
     case SHA256:
       hashSize = 32;
       break;
@@ -116,15 +115,14 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 }
 
 RCT_EXPORT_METHOD(
-  pbkdf2:(int)algorithm
-  withPass:(NSString *)pass
-  withSalt:(NSString *)salt
-  withIterations:(int)iterations
-  withKeyLength:(int)keyLength
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
-)
-{
+  pbkdf2:(double)algorithm
+  pass:(NSString *)pass
+  salt:(NSString *)salt
+  iterations:(double)iterations
+  keyLength:(double)keyLength
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
+) {
   dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
     NSData *raw_pass = [[NSData alloc]initWithBase64EncodedString:pass options:0];
     NSData *raw_salt = [[NSData alloc]initWithBase64EncodedString:salt options:0];
@@ -147,11 +145,10 @@ RCT_EXPORT_METHOD(
 }
 
 RCT_EXPORT_METHOD(mnemonicToSeed:(NSString *)mnemonic
-  withPassphrase:(NSString *)passphrase
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
-)
-{
+  passphrase:(NSString *)passphrase
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
+) {
   dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
     uint8_t *seed = (uint8_t *) malloc(64);
     cryptolib::mnemonicToSeed([mnemonic UTF8String], [passphrase UTF8String], seed);
@@ -163,9 +160,9 @@ RCT_EXPORT_METHOD(mnemonicToSeed:(NSString *)mnemonic
 }
 
 RCT_EXPORT_METHOD(
-  generateMnemonic:(int)strength
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  generateMnemonic:(double)strength
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   const char *mnemonic = cryptolib::generateMnemonic((uint32_t)strength);
   NSString *result = [NSString stringWithUTF8String:mnemonic];
@@ -175,8 +172,8 @@ RCT_EXPORT_METHOD(
 
 RCT_EXPORT_METHOD(
   validateMnemonic:(NSString *)mnemonic
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   int result = cryptolib::validateMnemonic([mnemonic UTF8String]);
   resolve([NSNumber numberWithInt: result]);
@@ -184,7 +181,7 @@ RCT_EXPORT_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   hdNodeFromSeed:(NSString *)curve
-  withSeed:(NSString *)seed
+  seed:(NSString *)seed
 ) {
   NSData *raw_seed = [[NSData alloc]initWithBase64EncodedString:seed options:0];
   HDNode node = {0};
@@ -225,9 +222,87 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   return result;
 }
 
+- (NSDictionary *)deriveHDNode:(HDNode *)node
+                  privateDerive:(BOOL)privateDerive
+                  curve:(NSString *)curve
+                  path:(NSArray<NSNumber *> *)path {
+  uint32_t *path_arr = (uint32_t *) malloc(sizeof(uint32_t) * [path count]);
+  if (!path_arr) {
+    @throw [NSException exceptionWithName:@"Error" reason:@"Memory allocation failed" userInfo:nil];
+  }
+  
+  for (int i = 0; i < [path count]; i++) {
+    path_arr[i] = [[path objectAtIndex:i] unsignedIntValue];
+  }
+  
+  int success = cryptolib::hdNodeDerive(node, privateDerive, [path count], path_arr);
+  free(path_arr);
+  
+  if (success != 1) {
+    memzero(node, sizeof(HDNode));
+    @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
+  }
+  
+  uint32_t fp = hdnode_fingerprint(node);
+
+  NSDictionary *result = @{
+    @"depth": @(node->depth),
+    @"child_num": @(node->child_num),
+    @"chain_code": [[NSData dataWithBytes:node->chain_code length:sizeof(node->chain_code)] base64EncodedStringWithOptions:0],
+    @"private_key": [[NSData dataWithBytes:node->private_key length:sizeof(node->private_key)] base64EncodedStringWithOptions:0],
+    @"public_key": [[NSData dataWithBytes:node->public_key length:sizeof(node->public_key)] base64EncodedStringWithOptions:0],
+    @"fingerprint": @(fp),
+    @"curve": curve,
+    @"private_derive": @(privateDerive)
+  };
+  
+  memzero(&node, sizeof(HDNode));
+  fp = 0;
+  return result;
+}
+
+#ifdef RCT_NEW_ARCH_ENABLED
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
+  hdNodeDerive:(JS::NativeCryptoLib::HDNode &)data
+  path:(NSArray<NSNumber *> *)path
+) {
+  HDNode node = {};
+  
+  node.depth = (uint32_t)data.depth();
+  node.child_num = (uint32_t)data.child_num();
+  
+  NSData *chain_code = [[NSData alloc] initWithBase64EncodedString:data.chain_code() options:0];
+  if ([chain_code length] == sizeof(node.chain_code)) {
+    memcpy(&node.chain_code, [chain_code bytes], sizeof(node.chain_code));
+  }
+  NSData *private_key = [[NSData alloc] initWithBase64EncodedString:data.private_key() options:0];
+  if ([private_key length] == sizeof(node.private_key)) {
+    memcpy(&node.private_key, [private_key bytes], sizeof(node.private_key));
+  }
+  NSData *public_key = [[NSData alloc] initWithBase64EncodedString:data.public_key() options:0];
+  if ([public_key length] == sizeof(node.public_key)) {
+    memcpy(&node.public_key, [public_key bytes], sizeof(node.public_key));
+  }
+
+  NSString *curve = data.curve();
+  
+  node.curve = get_curve_by_name([curve UTF8String]);
+
+  if (!node.curve) {
+    memzero(&node, sizeof(HDNode));
+    @throw [NSException exceptionWithName:@"Error" reason:@"curve error" userInfo:nil];
+  }
+
+  BOOL private_derive = data.private_derive();
+
+  NSDictionary *result = [self deriveHDNode:&node privateDerive:private_derive curve:curve path:path];
+
+  return result;
+}
+#else
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   hdNodeDerive:(NSDictionary *)data
-  withIndex:(NSArray *)path
+  path:(NSArray<NSNumber *> *)path
 ) {
   HDNode node = {};
   
@@ -260,64 +335,28 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
     }
   }
 
-  if (data[@"curve"]) {
-    node.curve = get_curve_by_name([data[@"curve"] UTF8String]);
+  NSString *curve = data[@"curve"];
+
+  if (curve) {
+    node.curve = get_curve_by_name([curve UTF8String]);
+  }
+
+  if (!node.curve) {
+    memzero(&node, sizeof(HDNode));
+    @throw [NSException exceptionWithName:@"Error" reason:@"curve error" userInfo:nil];
   }
     
   BOOL private_derive = [data[@"private_derive"] boolValue];
-    
-  int success = 0;
-  
-  for (int i = 0; i < [path count]; i++) {
-    uint32_t index = [[path objectAtIndex:i] unsignedIntValue];
-    
-    if (private_derive) {
-      success = hdnode_private_ckd(&node, index);
-      if (success == 1) {
-        hdnode_fill_public_key(&node);
-      }
-    } else {
-      success = hdnode_public_ckd(&node, index);
-    }
-    
-    if (success != 1) {
-      memzero(&node, sizeof(HDNode));
-      @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
-    }
-  }
 
-  uint32_t fp = hdnode_fingerprint(&node);
-
-  NSDictionary *result = @{
-    @"depth": [NSNumber numberWithUnsignedInt: node.depth],
-    @"child_num": [NSNumber numberWithUnsignedInt: node.child_num],
-    @"chain_code": [
-      [NSData dataWithBytes: node.chain_code length: sizeof(node.chain_code)]
-      base64EncodedStringWithOptions:0
-    ],
-    @"private_key": [
-      [NSData dataWithBytes: node.private_key length: sizeof(node.private_key)]
-      base64EncodedStringWithOptions:0
-    ],
-    @"public_key": [
-      [NSData dataWithBytes: node.public_key length: sizeof(node.public_key)]
-      base64EncodedStringWithOptions:0
-    ],
-    @"fingerprint": [NSNumber numberWithUnsignedInt: fp],
-    @"curve": data[@"curve"],
-    @"private_derive": @(private_derive),
-  };
-
-  memzero(&node, sizeof(HDNode));
-  fp = 0;
+  NSDictionary *result = [self deriveHDNode:&node privateDerive:private_derive curve:curve path:path];
 
   return result;
 }
+#endif
 
-RCT_REMAP_METHOD(
-  ecdsaRandomPrivate,
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+RCT_EXPORT_METHOD(
+  ecdsaRandomPrivate:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   uint8_t *priv = (uint8_t *) malloc(ECDSA_KEY_SIZE);
   
@@ -349,7 +388,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaGetPublic:(NSString *)priv
-  withCompact:(BOOL)compact
+  compact:(BOOL)compact
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
 
@@ -374,7 +413,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaReadPublic:(NSString *)pub
-  withCompact:(BOOL)compact
+  compact:(BOOL)compact
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
 
@@ -415,15 +454,15 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaRecover:(NSString *)sig
-  withRecId:(int)recId
-  withDigest:(NSString *)digest
+  recId:(double)recId
+  digest:(NSString *)digest
 ) {
   NSData *raw_sig = [[NSData alloc]initWithBase64EncodedString:sig options:0];
   NSData *raw_digest = [[NSData alloc]initWithBase64EncodedString:digest options:0];
 
   uint8_t *pub = (uint8_t *) malloc(ECDSA_KEY_65_SIZE);
 
-  if (!cryptolib::ecdsaRecover((uint8_t *)[raw_sig bytes], recId, (uint8_t *)[raw_digest bytes], pub)) {
+  if (!cryptolib::ecdsaRecover((uint8_t *)[raw_sig bytes], (int)recId, (uint8_t *)[raw_digest bytes], pub)) {
     free(pub);
     @throw [NSException exceptionWithName:@"Error" reason:@"recover error" userInfo:nil];
   }
@@ -437,8 +476,8 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaEcdh:(NSString *)pub
-  withPriv:(NSString *)priv
-  withCompact:(BOOL)compact
+  priv:(NSString *)priv
+  compact:(BOOL)compact
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
@@ -464,8 +503,8 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaVerify:(NSString *)pub
-  withSign:(NSString *)sign
-  withDigest:(NSString *)digest
+  sign:(NSString *)sign
+  digest:(NSString *)digest
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
   NSData *raw_sign = [[NSData alloc]initWithBase64EncodedString:sign options:0];
@@ -484,7 +523,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   ecdsaSign:(NSString *)priv
-  withDigest:(NSString *)digest
+  digest:(NSString *)digest
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
   NSData *raw_digest = [[NSData alloc]initWithBase64EncodedString:digest options:0];
@@ -508,9 +547,9 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_METHOD(
   ecdsaSignAsync:(NSString *)priv
-  withDigest:(NSString *)digest
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  digest:(NSString *)digest
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
   NSData *raw_digest = [[NSData alloc]initWithBase64EncodedString:digest options:0];
@@ -535,11 +574,11 @@ RCT_EXPORT_METHOD(
 
 RCT_EXPORT_METHOD(
   encrypt:(NSString *)key
-  withIv:(NSString *)iv
-  withData:(NSString *)data
-  withPaddingMode:(int)paddingMode
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  iv:(NSString *)iv
+  data:(NSString *)data
+  paddingMode:(double)paddingMode
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   NSData *raw_key = [[NSData alloc]initWithBase64EncodedString:key options:0];
   NSData *raw_iv = [[NSData alloc]initWithBase64EncodedString:iv options:0];
@@ -572,7 +611,7 @@ RCT_EXPORT_METHOD(
 
   if (idx < resultSize) {
     uint8_t padded[AES_BLOCK_SIZE] = {0};
-    if (paddingMode == AESPaddingModePKCS7) {
+    if ((AESPaddingMode) paddingMode == AESPaddingModePKCS7) {
       std::memset(padded, static_cast<int>(padding), AES_BLOCK_SIZE);
     }
     std::memcpy(padded, data_bytes + idx, dataSize - idx);
@@ -592,11 +631,11 @@ RCT_EXPORT_METHOD(
 
 RCT_EXPORT_METHOD(
   decrypt:(NSString *)key
-  withIv:(NSString *)iv
-  withData:(NSString *)data
-  withPaddingMode:(int)paddingMode
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  iv:(NSString *)iv
+  data:(NSString *)data
+  paddingMode:(double)paddingMode
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   NSData *raw_key = [[NSData alloc]initWithBase64EncodedString:key options:0];
   NSData *raw_iv = [[NSData alloc]initWithBase64EncodedString:iv options:0];
@@ -626,7 +665,7 @@ RCT_EXPORT_METHOD(
 
   size_t resultSize = dataSize;
 
-  if (paddingMode == AESPaddingModePKCS7 && dataSize > 0) {
+  if ((AESPaddingMode) paddingMode == AESPaddingModePKCS7 && dataSize > 0) {
     size_t paddingSize = result[dataSize - 1];
     if (paddingSize <= dataSize) {
       resultSize = resultSize - paddingSize;
@@ -676,7 +715,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   schnorrSign:(NSString *)priv
-  withDigest:(NSString *)digest
+  digest:(NSString *)digest
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
   NSData *raw_digest = [[NSData alloc]initWithBase64EncodedString:digest options:0];
@@ -709,9 +748,9 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_METHOD(
   schnorrSignAsync:(NSString *)priv
-  withDigest:(NSString *)digest
-  resolver:(RCTPromiseResolveBlock)resolve
-  rejecter:(RCTPromiseRejectBlock)reject
+  digest:(NSString *)digest
+  resolve:(RCTPromiseResolveBlock)resolve
+  reject:(RCTPromiseRejectBlock)reject
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
   NSData *raw_digest = [[NSData alloc]initWithBase64EncodedString:digest options:0];
@@ -744,8 +783,8 @@ RCT_EXPORT_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   schnorrVerify:(NSString *)pub
-  withSign:(NSString *)sign
-  withDigest:(NSString *)digest
+  sign:(NSString *)sign
+  digest:(NSString *)digest
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
   NSData *raw_sign = [[NSData alloc]initWithBase64EncodedString:sign options:0];
@@ -772,7 +811,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   schnorrTweakPublic:(NSString *)pub
-  withRoot:(NSString *)root
+  root:(NSString *)root
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
   NSData *raw_root = [[NSData alloc]initWithBase64EncodedString:root options:0];
@@ -806,7 +845,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   schnorrTweakPrivate:(NSString *)priv
-  withRoot:(NSString *)root
+  root:(NSString *)root
 ) {
   NSData *raw_priv = [[NSData alloc]initWithBase64EncodedString:priv options:0];
   NSData *raw_root = [[NSData alloc]initWithBase64EncodedString:root options:0];
@@ -864,7 +903,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   xOnlyPointAddTweak:(NSString *)pub
-  withTweak:(NSString *)tweak
+  tweak:(NSString *)tweak
 ) {
   NSData *raw_pub = [[NSData alloc]initWithBase64EncodedString:pub options:0];
   NSData *raw_tweak = [[NSData alloc]initWithBase64EncodedString:tweak options:0];
@@ -903,5 +942,14 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
   return result;
 }
+
+// Don't compile this code when we build for the old architecture.
+#ifdef RCT_NEW_ARCH_ENABLED
+- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
+    (const facebook::react::ObjCTurboModule::InitParams &)params
+{
+    return std::make_shared<facebook::react::NativeCryptoLibSpecJSI>(params);
+}
+#endif
 
 @end
