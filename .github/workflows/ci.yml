@@ -148,6 +148,7 @@ jobs:
         if: env.turbo_cache_hit != 1 && steps.cocoapods-cache.outputs.cache-hit != 'true'
         run: |
           cd example/ios
+          rm -rf ./Pods
           pod install
         env:
           NO_FLIPPER: 1
