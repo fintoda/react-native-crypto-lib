@@ -30,7 +30,8 @@ target 'CryptoLibExample' do
 
 
   pre_install do |installer|
-    system("cd ../../ && npx bob build --target codegen")
+    # system("cd ../../ && npx bob build --target codegen")
+    system("cd ../../ && npx @react-native-community/cli codegen --platform ios --verbose")
   end
 
   post_install do |installer|
