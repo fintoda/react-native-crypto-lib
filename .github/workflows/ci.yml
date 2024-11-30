@@ -153,9 +153,7 @@ jobs:
         env:
           NO_FLIPPER: 1
 
-      - name: Build package
-        run: yarn prepare
-      
       - name: Build example for iOS
         run: |
+          yarn prepare
           yarn turbo run build:ios --cache-dir="${{ env.TURBO_CACHE_DIR }}"
