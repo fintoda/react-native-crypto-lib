@@ -140,7 +140,8 @@
     "github": {
       "release": false
     },
-    "plugins": {}
+    "plugins": {},
+    "increment": false
   },
   "eslintConfig": {
     "root": true,
