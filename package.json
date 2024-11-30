@@ -135,13 +135,9 @@
       "publish": true
     },
     "github": {
-      "release": true
+      "release": false
     },
-    "plugins": {
-      "@release-it/conventional-changelog": {
-        "preset": "angular"
-      }
-    }
+    "plugins": {}
   },
   "eslintConfig": {
     "root": true,
