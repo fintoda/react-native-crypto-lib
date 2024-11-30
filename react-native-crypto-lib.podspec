@@ -15,7 +15,8 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => min_ios_version_supported }
   s.source       = { :git => "https://github.com/fintoda/react-native-crypto-lib.git", :tag => "#{s.version}" }
 
-  s.source_files =  "ios/**/*.{h,m,mm}",
+  s.source_files =  "ios/**/*.{h,m,mm,c,cpp}",
+                    "ios/generated/**/*.{h,m,mm,c,cpp}",
                     "cpp/**/*.{hpp,cpp,c,h}",
                     "crypto/**/*.{h,c}",
                     "vendor/secp256k1-zkp/**/*.h",
