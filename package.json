@@ -129,16 +129,13 @@
   "release-it": {
     "git": {
       "commitMessage": "chore: release ${version}",
-      "tagName": "v${version}",
-      "commit": false,
-      "tag": false,
-      "push": false
+      "tagName": "v${version}"
     },
     "npm": {
       "publish": true
     },
     "github": {
-      "release": false
+      "release": true
     },
     "plugins": {
       "@release-it/conventional-changelog": {
