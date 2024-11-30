@@ -31,6 +31,8 @@ target 'CryptoLibExample' do
 
   pre_install do |installer|
     # system("cd ../../ && npx bob build --target codegen")
+    system("whoami")
+    system("ls -al /Users/runner/work/react-native-crypto-lib/react-native-crypto-lib/node_modules/.bin/")
     system("cd ../../ && npx @react-native-community/cli codegen --platform ios --verbose")
   end
 
