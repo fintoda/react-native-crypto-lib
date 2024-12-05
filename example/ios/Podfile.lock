@@ -1242,7 +1242,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - Yoga
-  - react-native-crypto-lib (0.6.0):
+  - react-native-crypto-lib (0.6.1):
     - DoubleConversion
     - glog
     - hermes-engine
@@ -1772,7 +1772,7 @@ SPEC CHECKSUMS:
   React-logger: 26155dc23db5c9038794db915f80bd2044512c2e
   React-Mapbuffer: ad1ba0205205a16dbff11b8ade6d1b3959451658
   React-microtasksnativemodule: e771eb9eb6ace5884ee40a293a0e14a9d7a4343c
-  react-native-crypto-lib: a88eb57ba554b10da0e6922f62995fa82a983fbd
+  react-native-crypto-lib: 1670cc6e7792224ab3e67de2cb01c3041b7c4b58
   React-nativeconfig: aeed6e2a8ac02b2df54476afcc7c663416c12bf7
   React-NativeModulesApple: c5b7813da94136f50ef084fa1ac077332dcfc658
   React-perflogger: 6afb7eebf7d9521cc70481688ccddf212970e9d3
@@ -1803,6 +1803,6 @@ SPEC CHECKSUMS:
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   Yoga: 3deb2471faa9916c8a82dda2a22d3fba2620ad37
 
-PODFILE CHECKSUM: 2943af453d4ca0d7fa115c2fd887a35d66a8813c
+PODFILE CHECKSUM: 795f5c3bf7d31cfc78886a82be69c293b321e985
 
 COCOAPODS: 1.16.2
