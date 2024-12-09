@@ -85,6 +85,12 @@ public class CryptoLibModule extends ReactContextBaseJavaModule {
   }
 
   @ReactMethod(isBlockingSynchronousMethod = true)
+  public String randomBytesSync(int length) {
+    byte[] bytes = nativeRandomBytes(length);
+    return Base64.encodeToString(bytes, Base64.NO_WRAP);
+  }
+
+  @ReactMethod(isBlockingSynchronousMethod = true)
   public String hash(final int type, final String data) {
     byte[] bytes = Base64.decode(data, Base64.NO_PADDING);
     byte[] hash = nativeHash(type, bytes);

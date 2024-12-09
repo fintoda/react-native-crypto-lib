@@ -6,5 +6,6 @@ import * as ecdsa from './ecdsa';
 import * as aes from './aes';
 import * as schnorr from './schnorr';
 import ecc from './ecc';
+import * as crypto from './crypto';
 
-export { rng, digest, bip39, bip32, ecdsa, aes, schnorr, ecc };
+export { rng, digest, bip39, bip32, ecdsa, aes, schnorr, ecc, crypto };

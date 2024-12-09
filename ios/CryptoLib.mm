@@ -34,6 +34,18 @@ RCT_EXPORT_METHOD(randomBytes:(double)length
 }
 
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
+  randomBytesSync:(double)length
+) {
+  uint8_t *bytes = (uint8_t *) malloc(length);
+  cryptolib::randomBytes(bytes, length);
+
+  NSData *result = [NSData dataWithBytes:bytes length:length];
+
+  free(bytes);
+  return [result base64EncodedStringWithOptions:0];
+}
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   hash:(double)algorithm
   data:(NSString *)data
 ) {
