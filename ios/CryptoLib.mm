@@ -234,45 +234,6 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   return result;
 }
 
-- (NSDictionary *)deriveHDNode:(HDNode *)node
-                  privateDerive:(BOOL)privateDerive
-                  curve:(NSString *)curve
-                  path:(NSArray<NSNumber *> *)path {
-  uint32_t *path_arr = (uint32_t *) malloc(sizeof(uint32_t) * [path count]);
-  if (!path_arr) {
-    @throw [NSException exceptionWithName:@"Error" reason:@"Memory allocation failed" userInfo:nil];
-  }
-  
-  for (int i = 0; i < [path count]; i++) {
-    path_arr[i] = [[path objectAtIndex:i] unsignedIntValue];
-  }
-  
-  int success = cryptolib::hdNodeDerive(node, privateDerive, [path count], path_arr);
-  free(path_arr);
-  
-  if (success != 1) {
-    memzero(node, sizeof(HDNode));
-    @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
-  }
-  
-  uint32_t fp = hdnode_fingerprint(node);
-
-  NSDictionary *result = @{
-    @"depth": @(node->depth),
-    @"child_num": @(node->child_num),
-    @"chain_code": [[NSData dataWithBytes:node->chain_code length:sizeof(node->chain_code)] base64EncodedStringWithOptions:0],
-    @"private_key": [[NSData dataWithBytes:node->private_key length:sizeof(node->private_key)] base64EncodedStringWithOptions:0],
-    @"public_key": [[NSData dataWithBytes:node->public_key length:sizeof(node->public_key)] base64EncodedStringWithOptions:0],
-    @"fingerprint": @(fp),
-    @"curve": curve,
-    @"private_derive": @(privateDerive)
-  };
-  
-  memzero(&node, sizeof(HDNode));
-  fp = 0;
-  return result;
-}
-
 #ifdef RCT_NEW_ARCH_ENABLED
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   hdNodeDerive:(JS::NativeCryptoLib::HDNode &)data
@@ -323,7 +284,38 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
   BOOL private_derive = data.private_derive();
 
-  NSDictionary *result = [self deriveHDNode:&node privateDerive:private_derive curve:curve path:path];
+  uint32_t *path_arr = (uint32_t *) malloc(sizeof(uint32_t) * [path count]);
+  if (!path_arr) {
+    @throw [NSException exceptionWithName:@"Error" reason:@"Memory allocation failed" userInfo:nil];
+  }
+  
+  for (int i = 0; i < [path count]; i++) {
+    path_arr[i] = [[path objectAtIndex:i] unsignedIntValue];
+  }
+  
+  int success = cryptolib::hdNodeDerive(&node, private_derive, [path count], path_arr);
+  free(path_arr);
+  
+  if (success != 1) {
+    memzero(&node, sizeof(HDNode));
+    @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
+  }
+  
+  uint32_t fp = hdnode_fingerprint(&node);
+
+  NSDictionary *result = @{
+    @"depth": @(node.depth),
+    @"child_num": @(node.child_num),
+    @"chain_code": [[NSData dataWithBytes:node.chain_code length:sizeof(node.chain_code)] base64EncodedStringWithOptions:0],
+    @"private_key": [[NSData dataWithBytes:node.private_key length:sizeof(node.private_key)] base64EncodedStringWithOptions:0],
+    @"public_key": [[NSData dataWithBytes:node.public_key length:sizeof(node.public_key)] base64EncodedStringWithOptions:0],
+    @"fingerprint": @(fp),
+    @"curve": curve,
+    @"private_derive": @(private_derive)
+  };
+  
+  memzero(&node, sizeof(HDNode));
+  fp = 0;
 
   return result;
 }
@@ -376,7 +368,38 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
     
   BOOL private_derive = [data[@"private_derive"] boolValue];
 
-  NSDictionary *result = [self deriveHDNode:&node privateDerive:private_derive curve:curve path:path];
+  uint32_t *path_arr = (uint32_t *) malloc(sizeof(uint32_t) * [path count]);
+  if (!path_arr) {
+    @throw [NSException exceptionWithName:@"Error" reason:@"Memory allocation failed" userInfo:nil];
+  }
+  
+  for (int i = 0; i < [path count]; i++) {
+    path_arr[i] = [[path objectAtIndex:i] unsignedIntValue];
+  }
+  
+  int success = cryptolib::hdNodeDerive(&node, private_derive, [path count], path_arr);
+  free(path_arr);
+  
+  if (success != 1) {
+    memzero(&node, sizeof(HDNode));
+    @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
+  }
+  
+  uint32_t fp = hdnode_fingerprint(&node);
+
+  NSDictionary *result = @{
+    @"depth": @(node.depth),
+    @"child_num": @(node.child_num),
+    @"chain_code": [[NSData dataWithBytes:node.chain_code length:sizeof(node.chain_code)] base64EncodedStringWithOptions:0],
+    @"private_key": [[NSData dataWithBytes:node.private_key length:sizeof(node.private_key)] base64EncodedStringWithOptions:0],
+    @"public_key": [[NSData dataWithBytes:node.public_key length:sizeof(node.public_key)] base64EncodedStringWithOptions:0],
+    @"fingerprint": @(fp),
+    @"curve": curve,
+    @"private_derive": @(private_derive)
+  };
+  
+  memzero(&node, sizeof(HDNode));
+  fp = 0;
 
   return result;
 }
