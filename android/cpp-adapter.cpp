@@ -292,23 +292,54 @@ Java_com_cryptolib_CryptoLibModule_nativeHdNodeDerive(
 
   HDNode node = {};
 
-  node.depth = (uint32_t) env->GetDoubleField(data, depth_field);
-  node.child_num = (uint32_t) env->GetDoubleField(data, child_num_field);
+  if (depth_field != nullptr) {
+    node.depth = (uint32_t) env->GetDoubleField(data, depth_field);
+  }
+  if (child_num_field != nullptr) {
+    node.child_num = (uint32_t) env->GetDoubleField(data, child_num_field);
+  }
 
-  jbyteArray chain_code = (jbyteArray) env->GetObjectField(data, chain_code_field);
-  env->GetByteArrayRegion(chain_code, 0, sizeof(node.chain_code), (jbyte *) &node.chain_code);
+  jbyteArray chain_code;
 
-  jbyteArray private_key = (jbyteArray) env->GetObjectField(data, private_key_field);
-  env->GetByteArrayRegion(private_key, 0, sizeof(node.private_key), (jbyte *) &node.private_key);
+  if (chain_code_field != nullptr) {
+    chain_code = (jbyteArray) env->GetObjectField(data, chain_code_field);
+    if (chain_code != NULL) {
+      env->GetByteArrayRegion(chain_code, 0, sizeof(node.chain_code), (jbyte *) &node.chain_code);
+    }
+  }
 
-  jbyteArray public_key = (jbyteArray) env->GetObjectField(data, public_key_field);
-  env->GetByteArrayRegion(public_key, 0, sizeof(node.public_key), (jbyte *) &node.public_key);
+  jbyteArray private_key;
 
-  jstring curve = (jstring) env->GetObjectField(data, curve_field);
+  if (private_key_field != nullptr) {
+    private_key = (jbyteArray) env->GetObjectField(data, private_key_field);
+    if (private_key != NULL) {
+      env->GetByteArrayRegion(private_key, 0, sizeof(node.private_key), (jbyte *) &node.private_key);
+    }
+  }
 
-  node.curve = get_curve_by_name(env->GetStringUTFChars(curve, (jboolean *)false));
+  jbyteArray public_key;
 
-  bool private_derive = env->GetBooleanField(data, private_derive_field);
+  if (public_key_field != nullptr) {
+    public_key = (jbyteArray) env->GetObjectField(data, public_key_field);
+    if (public_key != NULL) {
+      env->GetByteArrayRegion(public_key, 0, sizeof(node.public_key), (jbyte *) &node.public_key);
+    }
+  }
+
+  jstring curve;
+
+  if (curve_field != nullptr) {
+    curve = (jstring) env->GetObjectField(data, curve_field);
+    if (curve != NULL) {
+      node.curve = get_curve_by_name(env->GetStringUTFChars(curve, (jboolean *)false));
+    }
+  }
+
+  bool private_derive;
+
+  if (private_derive_field != nullptr) {
+    private_derive = env->GetBooleanField(data, private_derive_field);
+  }
 
   jdouble *path_items = env->GetDoubleArrayElements(path, (jboolean *)false);
   jsize path_items_count = env->GetArrayLength(path);

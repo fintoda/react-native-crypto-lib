@@ -283,22 +283,38 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   node.depth = (uint32_t)data.depth();
   node.child_num = (uint32_t)data.child_num();
   
-  NSData *chain_code = [[NSData alloc] initWithBase64EncodedString:data.chain_code() options:0];
-  if ([chain_code length] == sizeof(node.chain_code)) {
-    memcpy(&node.chain_code, [chain_code bytes], sizeof(node.chain_code));
+  NSString * chain_code_str = data.chain_code();
+  NSString * private_key_str = data.private_key();
+  NSString * public_key_str = data.public_key();
+  
+  NSData *chain_code;
+  NSData *private_key;
+  NSData *public_key;
+  
+  if (chain_code_str) {
+    chain_code = [[NSData alloc] initWithBase64EncodedString:data.chain_code() options:0];
+    if ([chain_code length] == sizeof(node.chain_code)) {
+      memcpy(&node.chain_code, [chain_code bytes], sizeof(node.chain_code));
+    }
   }
-  NSData *private_key = [[NSData alloc] initWithBase64EncodedString:data.private_key() options:0];
-  if ([private_key length] == sizeof(node.private_key)) {
-    memcpy(&node.private_key, [private_key bytes], sizeof(node.private_key));
+  if (private_key_str) {
+    NSData *private_key = [[NSData alloc] initWithBase64EncodedString:data.private_key() options:0];
+    if ([private_key length] == sizeof(node.private_key)) {
+      memcpy(&node.private_key, [private_key bytes], sizeof(node.private_key));
+    }
   }
-  NSData *public_key = [[NSData alloc] initWithBase64EncodedString:data.public_key() options:0];
-  if ([public_key length] == sizeof(node.public_key)) {
-    memcpy(&node.public_key, [public_key bytes], sizeof(node.public_key));
+  if (public_key_str) {
+    NSData *public_key = [[NSData alloc] initWithBase64EncodedString:data.public_key() options:0];
+    if ([public_key length] == sizeof(node.public_key)) {
+      memcpy(&node.public_key, [public_key bytes], sizeof(node.public_key));
+    }
   }
 
   NSString *curve = data.curve();
   
-  node.curve = get_curve_by_name([curve UTF8String]);
+  if (curve) {
+    node.curve = get_curve_by_name([curve UTF8String]);
+  }
 
   if (!node.curve) {
     memzero(&node, sizeof(HDNode));

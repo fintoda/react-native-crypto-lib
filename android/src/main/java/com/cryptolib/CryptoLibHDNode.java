@@ -18,14 +18,31 @@ public class CryptoLibHDNode {
 
   public static CryptoLibHDNode createNode(ReadableMap data) {
     CryptoLibHDNode node = new CryptoLibHDNode();
-    node.depth = data.getDouble("depth");
-    node.child_num = data.getDouble("child_num");
-    node.chain_code = Base64.decode(data.getString("chain_code"), Base64.NO_PADDING);
-    node.private_key = Base64.decode(data.getString("private_key"), Base64.NO_PADDING);
-    node.public_key = Base64.decode(data.getString("public_key"), Base64.NO_PADDING);
-    node.fingerprint = data.getDouble("fingerprint");
-    node.curve = data.getString("curve");
-    node.private_derive = data.getBoolean("private_derive");
+
+    if (data.hasKey("depth")) {
+      node.depth = data.getDouble("depth");
+    }
+    if (data.hasKey("child_num")) {
+      node.child_num = data.getDouble("child_num");
+    }
+    if (data.hasKey("chain_code")) {
+      node.chain_code = Base64.decode(data.getString("chain_code"), Base64.NO_PADDING);
+    }
+    if (data.hasKey("private_key")) {
+      node.private_key = Base64.decode(data.getString("private_key"), Base64.NO_PADDING);
+    }
+    if (data.hasKey("public_key")) {
+      node.public_key = Base64.decode(data.getString("public_key"), Base64.NO_PADDING);
+    }
+    if (data.hasKey("fingerprint")) {
+      node.fingerprint = data.getDouble("fingerprint");
+    }
+    if (data.hasKey("curve")) {
+      node.curve = data.getString("curve");
+    }
+    if (data.hasKey("private_derive")) {
+      node.private_derive = data.getBoolean("private_derive");
+    }
 
     return node;
   }

@@ -270,6 +270,30 @@ async function test() {
     throw new Error('bip32.derivePath');
   }
 
+  const bip32_child_pub = bip32.derivePath(
+    {
+      depth: bip32_node0.depth,
+      child_num: bip32_node0.child_num,
+      public_key: bip32_node0.public_key,
+      chain_code: bip32_node0.chain_code,
+      fingerprint: 0,
+      curve: bip32_node0.curve,
+      private_derive: false,
+    },
+    `0/0`
+  );
+  if (
+    bip32_child_pub.depth !== 5 ||
+    bip32_child_pub.child_num !== 0 ||
+    bip32_child_pub.public_key !==
+      'AwtbcMGyfFug7TbGMppktwqd8WyG11j1gKr2BgtNwcLf' ||
+    bip32_child_pub.chain_code !==
+      'AeqQDr8EsHQWmxwDvju+G9uVF5ETxLttF7n9mw0qWE0=' ||
+    bip32_child_pub.fingerprint !== 584842416
+  ) {
+    throw new Error('bip32.derivePath (pub)');
+  }
+
   const ecdsa_priv = await ecdsa.ecdsaRandomPrivate();
   if (ecdsa_priv.length !== 32) {
     throw new Error('ecdsa.ecdsaRandomPrivate');
