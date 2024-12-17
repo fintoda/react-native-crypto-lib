@@ -14,7 +14,8 @@ interface HDNode {
 
 export interface Spec extends TurboModule {
   randomNumber(): Promise<number>;
-  randomBytes(length: number): Promise<number>;
+  randomBytes(length: number): Promise<string>;
+  randomBytesSync(length: number): string;
 
   hash(algorithm: number, data: string): string;
   hmac(algorithm: number, key: string, data: string): string;
