@@ -23,12 +23,7 @@ export type HDNode = {
   private_derive: boolean;
 };
 
-// @ts-expect-error
-const isTurboModuleEnabled = global.__turboModuleProxy != null;
-
-const CryptoLibNative = isTurboModuleEnabled
-  ? require('./NativeCryptoLib').default
-  : NativeModules.CryptoLib;
+const CryptoLibNative = NativeModules.CryptoLib;
 
 const HIGHEST_BIT = 0x80000000;
 const UINT31_MAX = Math.pow(2, 31) - 1;

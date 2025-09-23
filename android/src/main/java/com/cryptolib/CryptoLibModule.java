@@ -15,7 +15,6 @@ import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.module.annotations.ReactModule;
 
-@ReactModule(name = CryptoLibModule.NAME)
 public class CryptoLibModule extends ReactContextBaseJavaModule {
   public static final String NAME = "CryptoLib";
 
@@ -30,7 +29,7 @@ public class CryptoLibModule extends ReactContextBaseJavaModule {
   }
 
   static {
-    System.loadLibrary("cryptolib");
+    System.loadLibrary("react-native-crypto-lib");
   }
 
   private static native double nativeRandomNumber();

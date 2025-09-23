@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.4.1)
-
 project(CryptoLib)
 
 set (CMAKE_VERBOSE_MAKEFILE ON)
 set (CMAKE_CXX_STANDARD 14)
 
-file(GLOB_RECURSE lib_sources RELATIVE ${CMAKE_SOURCE_DIR}
+file(GLOB_RECURSE lib_crypto RELATIVE ${CMAKE_SOURCE_DIR}
         ../crypto/*.c
 )
 
@@ -15,9 +14,8 @@ file(GLOB lib_secp256k1 RELATIVE ${CMAKE_SOURCE_DIR}
         ../vendor/secp256k1-zkp/src/secp256k1.c
 )
 
-add_library(cryptolib
-            SHARED
-            ${lib_sources}
+add_library(react-native-crypto-lib            SHARED
+            ${lib_crypto}
             ${lib_secp256k1}
             ../cpp/react-native-crypto-lib.cpp
             cpp-adapter.cpp
@@ -30,7 +28,7 @@ include_directories(
             ../crypto/aes
 )
 
-target_compile_options(cryptolib
+target_compile_options(react-native-crypto-lib
   PRIVATE
     -std=gnu99
     -W
@@ -53,6 +51,7 @@ target_compile_options(cryptolib
     -Wno-missing-braces
     -Werror
     -Wno-unused-function
+    -Wno-unused-parameter
 
     -DUSE_MONERO=0
 
@@ -69,4 +68,12 @@ target_compile_options(cryptolib
     -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF
     -DSECP256K1_BUILD_CTIME_TESTS=OFF
     -DSECP256K1_BUILD_EXAMPLES=OFF
+
+    -D__BIONIC_NO_PAGE_SIZE_MACRO
 )
+
+if(ANDROID AND (ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64"))
+  target_link_options(react-native-crypto-lib PRIVATE
+    "-Wl,-z,max-page-size=16384"
+  )
+endif()

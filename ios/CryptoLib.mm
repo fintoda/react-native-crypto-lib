@@ -234,92 +234,6 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   return result;
 }
 
-#ifdef RCT_NEW_ARCH_ENABLED
-RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
-  hdNodeDerive:(JS::NativeCryptoLib::HDNode &)data
-  path:(NSArray<NSNumber *> *)path
-) {
-  HDNode node = {};
-  
-  node.depth = (uint32_t)data.depth();
-  node.child_num = (uint32_t)data.child_num();
-  
-  NSString * chain_code_str = data.chain_code();
-  NSString * private_key_str = data.private_key();
-  NSString * public_key_str = data.public_key();
-  
-  NSData *chain_code;
-  NSData *private_key;
-  NSData *public_key;
-  
-  if (chain_code_str) {
-    chain_code = [[NSData alloc] initWithBase64EncodedString:data.chain_code() options:0];
-    if ([chain_code length] == sizeof(node.chain_code)) {
-      memcpy(&node.chain_code, [chain_code bytes], sizeof(node.chain_code));
-    }
-  }
-  if (private_key_str) {
-    NSData *private_key = [[NSData alloc] initWithBase64EncodedString:data.private_key() options:0];
-    if ([private_key length] == sizeof(node.private_key)) {
-      memcpy(&node.private_key, [private_key bytes], sizeof(node.private_key));
-    }
-  }
-  if (public_key_str) {
-    NSData *public_key = [[NSData alloc] initWithBase64EncodedString:data.public_key() options:0];
-    if ([public_key length] == sizeof(node.public_key)) {
-      memcpy(&node.public_key, [public_key bytes], sizeof(node.public_key));
-    }
-  }
-
-  NSString *curve = data.curve();
-  
-  if (curve) {
-    node.curve = get_curve_by_name([curve UTF8String]);
-  }
-
-  if (!node.curve) {
-    memzero(&node, sizeof(HDNode));
-    @throw [NSException exceptionWithName:@"Error" reason:@"curve error" userInfo:nil];
-  }
-
-  BOOL private_derive = data.private_derive();
-
-  uint32_t *path_arr = (uint32_t *) malloc(sizeof(uint32_t) * [path count]);
-  if (!path_arr) {
-    @throw [NSException exceptionWithName:@"Error" reason:@"Memory allocation failed" userInfo:nil];
-  }
-  
-  for (int i = 0; i < [path count]; i++) {
-    path_arr[i] = [[path objectAtIndex:i] unsignedIntValue];
-  }
-  
-  int success = cryptolib::hdNodeDerive(&node, private_derive, [path count], path_arr);
-  free(path_arr);
-  
-  if (success != 1) {
-    memzero(&node, sizeof(HDNode));
-    @throw [NSException exceptionWithName:@"Error" reason:@"derive error" userInfo:nil];
-  }
-  
-  uint32_t fp = hdnode_fingerprint(&node);
-
-  NSDictionary *result = @{
-    @"depth": @(node.depth),
-    @"child_num": @(node.child_num),
-    @"chain_code": [[NSData dataWithBytes:node.chain_code length:sizeof(node.chain_code)] base64EncodedStringWithOptions:0],
-    @"private_key": [[NSData dataWithBytes:node.private_key length:sizeof(node.private_key)] base64EncodedStringWithOptions:0],
-    @"public_key": [[NSData dataWithBytes:node.public_key length:sizeof(node.public_key)] base64EncodedStringWithOptions:0],
-    @"fingerprint": @(fp),
-    @"curve": curve,
-    @"private_derive": @(private_derive)
-  };
-  
-  memzero(&node, sizeof(HDNode));
-  fp = 0;
-
-  return result;
-}
-#else
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
   hdNodeDerive:(NSDictionary *)data
   path:(NSArray<NSNumber *> *)path
@@ -403,7 +317,6 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
   return result;
 }
-#endif
 
 RCT_EXPORT_METHOD(
   ecdsaRandomPrivate:(RCTPromiseResolveBlock)resolve
@@ -993,14 +906,5 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(
 
   return result;
 }
-
-// Don't compile this code when we build for the old architecture.
-#ifdef RCT_NEW_ARCH_ENABLED
-- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
-    (const facebook::react::ObjCTurboModule::InitParams &)params
-{
-    return std::make_shared<facebook::react::NativeCryptoLibSpecJSI>(params);
-}
-#endif
 
 @end
