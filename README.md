@@ -10,7 +10,7 @@ that don't need them.
   BLAKE-256, BLAKE2b, BLAKE2s, Groestl-512, SHA-256d, Hash160.
 - **MAC / KDF**: HMAC-SHA256/512, PBKDF2-SHA256/512, HKDF-SHA256/512.
 - **RNG**: cryptographically secure random bytes backed by
-  `arc4random_buf` (ChaCha20 on iOS and Android NDK).
+  the OS CSPRNG (`arc4random_buf` on iOS / Android NDK).
 - **ECDSA** on secp256k1 and nist256p1: deterministic RFC 6979 signing,
   low-S normalisation, public-key recovery, ECDH, DER encode/decode.
 - **Schnorr / BIP-340**: sign, verify, x-only keys, taproot tweak.
