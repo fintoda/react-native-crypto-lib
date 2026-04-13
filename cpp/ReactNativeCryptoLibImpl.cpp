@@ -25,6 +25,7 @@ ReactNativeCryptoLibImpl::ReactNativeCryptoLibImpl(
   cryptolib::registerAesMethods(entries);
   cryptolib::registerBip39Methods(entries);
   cryptolib::registerBip32Methods(entries);
+  cryptolib::registerSlip39Methods(entries);
 
   for (const auto& e : entries) {
     methodMap_[e.name] = MethodMetadata{e.argCount, e.fn};

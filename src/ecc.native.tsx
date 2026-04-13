@@ -1,14 +1,4 @@
-import ReactNativeCryptoLib, {
-  type RawSpec,
-} from './NativeReactNativeCryptoLib';
-
-const raw = ReactNativeCryptoLib as unknown as RawSpec;
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-    ? (data.buffer as ArrayBuffer)
-    : (data.slice().buffer as ArrayBuffer);
-}
+import { raw, toArrayBuffer } from './buffer';
 
 // Native returns an empty ArrayBuffer to signal "null" (infinity /
 // out-of-range scalar). A real result is always non-empty.

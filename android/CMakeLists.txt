@@ -45,6 +45,9 @@ set(TREZOR_CRYPTO_SOURCES
     ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-32bit.c
     ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-helpers.c
     ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-scalarmult-base.c
+    ../vendor/trezor-crypto/crypto/shamir.c
+    ../vendor/trezor-crypto/crypto/slip39.c
+    ../vendor/trezor-crypto/crypto/slip39_english.c
 )
 
 add_library(
@@ -61,6 +64,7 @@ add_library(
     ../cpp/Aes.cpp
     ../cpp/Bip39.cpp
     ../cpp/Bip32.cpp
+    ../cpp/Slip39.cpp
     ${TREZOR_CRYPTO_SOURCES}
 )
 
@@ -89,7 +93,8 @@ target_compile_options(
     fintoda-react-native-crypto-lib    PRIVATE
     -fstack-protector-strong
     -D_FORTIFY_SOURCE=2
-    -Wno-deprecated-volatile
+    -Wno-deprecated-volatile   # trezor-crypto uses volatile in a C-style
+                                # pattern that C++20 deprecates; harmless
 )
 
 target_link_libraries(

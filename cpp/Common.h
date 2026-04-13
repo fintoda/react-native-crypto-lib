@@ -158,5 +158,6 @@ void registerEccMethods(MethodMap& map);
 void registerAesMethods(MethodMap& map);
 void registerBip39Methods(MethodMap& map);
 void registerBip32Methods(MethodMap& map);
+void registerSlip39Methods(MethodMap& map);
 
 }

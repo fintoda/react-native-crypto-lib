@@ -1,8 +1,4 @@
-import ReactNativeCryptoLib, {
-  type RawSpec,
-} from './NativeReactNativeCryptoLib';
-
-const raw = ReactNativeCryptoLib as unknown as RawSpec;
+import { raw } from './buffer';
 
 function bytes(count: number): Uint8Array {
   return new Uint8Array(raw.rng_bytes(count));

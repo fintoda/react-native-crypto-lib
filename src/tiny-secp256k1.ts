@@ -152,7 +152,6 @@ export const tinySecp256k1 = {
     if (res.xOnlyPubkey.length !== resultToCheck.length) return false;
     let diff = 0;
     for (let i = 0; i < res.xOnlyPubkey.length; i++) {
-      // eslint-disable-next-line no-bitwise
       diff |= (res.xOnlyPubkey[i] as number) ^ (resultToCheck[i] as number);
     }
     if (diff !== 0) return false;

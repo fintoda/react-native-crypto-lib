@@ -1,6 +1,4 @@
-import ReactNativeCryptoLib, {
-  type RawSpec,
-} from './NativeReactNativeCryptoLib';
+import { raw, toArrayBuffer } from './buffer';
 import {
   HARDENED_OFFSET,
   CURVE_TAG,
@@ -12,14 +10,6 @@ import {
 } from './bip32-utils';
 
 export type { Bip32Curve, HDNode } from './bip32-utils';
-
-const raw = ReactNativeCryptoLib as unknown as RawSpec;
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-    ? (data.buffer as ArrayBuffer)
-    : (data.slice().buffer as ArrayBuffer);
-}
 
 export const bip32 = {
   fromSeed(seed: Uint8Array, curve: Bip32Curve = 'secp256k1'): HDNode {

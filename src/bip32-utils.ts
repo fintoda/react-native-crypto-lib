@@ -23,14 +23,13 @@ export function readBeU32(bytes: Uint8Array, offset: number): number {
   // JS number and doesn't coerce to int32 (which would make values
   // >= 2**31 come back negative). DataView would be nicer but creating
   // one per read adds allocation noise in the hot derive path.
-  /* eslint-disable no-bitwise */
+
   return (
     bytes[offset]! * 0x1000000 +
     ((bytes[offset + 1]! << 16) |
       (bytes[offset + 2]! << 8) |
       bytes[offset + 3]!)
   );
-  /* eslint-enable no-bitwise */
 }
 
 export type HDNode = {
@@ -89,7 +88,7 @@ export function packPath(indices: number[]): ArrayBuffer {
     if (!Number.isInteger(i) || i < 0 || i > 0xffffffff) {
       throw new Error(`bip32: invalid path index ${i}`);
     }
-    // eslint-disable-next-line no-bitwise
+
     view.setUint32(k * 4, i >>> 0, false);
   });
   return buf;
