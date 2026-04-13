@@ -1,6 +1,6 @@
 {
   "name": "@fintoda/react-native-crypto-lib",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Comprehensive cryptography library for React Native, backed by trezor-crypto C core via synchronous JSI / Turbo Module",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
