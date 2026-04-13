@@ -1,19 +1,9 @@
-import ReactNativeCryptoLib, {
-  type RawSpec,
-} from './NativeReactNativeCryptoLib';
-
-const raw = ReactNativeCryptoLib as unknown as RawSpec;
+import { raw, toArrayBuffer } from './buffer';
 
 export type TweakedPublicKey = {
   pub: Uint8Array;
   parity: 0 | 1;
 };
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-    ? (data.buffer as ArrayBuffer)
-    : (data.slice().buffer as ArrayBuffer);
-}
 
 function toOptionalAB(data?: Uint8Array): ArrayBuffer | null {
   return data ? toArrayBuffer(data) : null;

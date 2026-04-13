@@ -12,6 +12,7 @@ import {
   mac,
   rng,
   schnorr,
+  slip39,
   x25519,
   ecc,
   tinySecp256k1,
@@ -949,6 +950,121 @@ function webcryptoTests(): TestResult[] {
 // Run all
 // =========================================================================
 
+// =========================================================================
+// SLIP-39 — Shamir Secret Sharing
+// =========================================================================
+
+function slip39Tests(): TestResult[] {
+  return [
+    // Round-trip: generate + combine recovers original secret (2-of-3)
+    check('slip39 round-trip 2-of-3', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece'); // 16 bytes
+      const shares = slip39.generate(secret, '', 2, 3, 0);
+      if (shares.length !== 3) return `expected 3 shares, got ${shares.length}`;
+      // Combine with first 2 shares
+      const recovered = slip39.combine([shares[0]!, shares[1]!], '');
+      return eq(recovered, secret) || `got ${toHex(recovered)}`;
+    }),
+
+    // Round-trip: combine with different pair of shares
+    check('slip39 round-trip different pair', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, '', 2, 3, 0);
+      const recovered = slip39.combine([shares[0]!, shares[2]!], '');
+      return eq(recovered, secret) || `got ${toHex(recovered)}`;
+    }),
+
+    // Round-trip with 32-byte secret
+    check('slip39 round-trip 32-byte secret', () => {
+      const secret = fromHex(
+        'bb54aac4b89dc868ba37d9cc21b2cece' + 'e25053423dba16c395a0e8a1bd04e656'
+      );
+      const shares = slip39.generate(secret, '', 3, 5, 0);
+      if (shares.length !== 5) return `expected 5 shares, got ${shares.length}`;
+      const recovered = slip39.combine(
+        [shares[0]!, shares[2]!, shares[4]!],
+        ''
+      );
+      return eq(recovered, secret) || `got ${toHex(recovered)}`;
+    }),
+
+    // Threshold 1: every share recovers the secret
+    check('slip39 threshold 1-of-3', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, '', 1, 3, 0);
+      const r1 = slip39.combine([shares[0]!], '');
+      const r2 = slip39.combine([shares[1]!], '');
+      const r3 = slip39.combine([shares[2]!], '');
+      return (
+        (eq(r1, secret) && eq(r2, secret) && eq(r3, secret)) ||
+        'not all shares recover the secret'
+      );
+    }),
+
+    // Passphrase changes the output
+    check('slip39 passphrase changes recovered secret', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, 'test', 2, 3, 0);
+      const correct = slip39.combine([shares[0]!, shares[1]!], 'test');
+      const wrong = slip39.combine([shares[0]!, shares[1]!], 'wrong');
+      return (
+        (eq(correct, secret) && !eq(wrong, secret)) ||
+        'passphrase did not affect result'
+      );
+    }),
+
+    // Validate mnemonic
+    check('slip39 validateMnemonic valid', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, '', 2, 2, 0);
+      return slip39.validateMnemonic(shares[0]!) || 'valid mnemonic rejected';
+    }),
+
+    // Validate mnemonic fails on corrupted input
+    check('slip39 validateMnemonic corrupted', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, '', 2, 2, 0);
+      // Corrupt a word
+      const words = shares[0]!.split(' ');
+      words[5] = words[5] === 'academic' ? 'acid' : 'academic';
+      const corrupted = words.join(' ');
+      return (
+        !slip39.validateMnemonic(corrupted) || 'corrupted mnemonic accepted'
+      );
+    }),
+
+    // Insufficient shares throws
+    throws('slip39 insufficient shares throws', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const shares = slip39.generate(secret, '', 3, 5, 0);
+      slip39.combine([shares[0]!, shares[1]!], ''); // only 2, need 3
+    }),
+
+    // Multi-group round-trip
+    check('slip39 multi-group 2-of-3 groups', () => {
+      const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
+      const groups = slip39.generateGroups(
+        secret,
+        '',
+        2,
+        [
+          { threshold: 2, count: 3 },
+          { threshold: 2, count: 3 },
+          { threshold: 1, count: 2 },
+        ],
+        0
+      );
+      if (groups.length !== 3) return `expected 3 groups, got ${groups.length}`;
+      // Use 2 shares from group 0 + 1 share from group 2
+      const recovered = slip39.combine(
+        [groups[0]![0]!, groups[0]![1]!, groups[2]![0]!],
+        ''
+      );
+      return eq(recovered, secret) || `got ${toHex(recovered)}`;
+    }),
+  ];
+}
+
 export function runAllTests(): TestResult[] {
   return [
     ...hashTests(),
@@ -962,5 +1078,6 @@ export function runAllTests(): TestResult[] {
     ...bipTests(),
     ...eccTests(),
     ...webcryptoTests(),
+    ...slip39Tests(),
   ];
 }

@@ -46,6 +46,9 @@ trezor_crypto_sources = %w[
   vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-32bit.c
   vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-helpers.c
   vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-scalarmult-base.c
+  vendor/trezor-crypto/crypto/shamir.c
+  vendor/trezor-crypto/crypto/slip39.c
+  vendor/trezor-crypto/crypto/slip39_english.c
 ]
 
 Pod::Spec.new do |s|

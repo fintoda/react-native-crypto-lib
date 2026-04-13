@@ -211,6 +211,29 @@ export interface RawSpec {
     isPrivate: boolean
   ): ArrayBuffer;
   bip32_fingerprint(node: ArrayBuffer): number;
+
+  /**
+   * SLIP-39 Shamir Secret Sharing.
+   * Single-group: split master secret into threshold-of-shareCount shares.
+   */
+  slip39_generate(
+    masterSecret: ArrayBuffer,
+    passphrase: string,
+    threshold: number,
+    shareCount: number,
+    iterationExponent: number
+  ): string[];
+  /** Multi-group: groups is packed uint8 pairs [threshold, count, ...]. */
+  slip39_generate_groups(
+    masterSecret: ArrayBuffer,
+    passphrase: string,
+    groupThreshold: number,
+    groups: ArrayBuffer,
+    iterationExponent: number
+  ): string[][];
+  /** Recover master secret from '\n'-joined mnemonics. */
+  slip39_combine(mnemonics: string, passphrase: string): ArrayBuffer;
+  slip39_validate_mnemonic(mnemonic: string): boolean;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeCryptoLib');

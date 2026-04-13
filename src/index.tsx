@@ -13,6 +13,8 @@ export { bip39 } from './bip39';
 export type { Bip39Strength } from './bip39';
 export { bip32 } from './bip32';
 export type { Bip32Curve, HDNode } from './bip32';
+export { slip39 } from './slip39';
+export type { Slip39Group } from './slip39';
 export { getRandomValues, installCryptoPolyfill } from './webcrypto';
 export { ecc } from './ecc';
 export type { XOnlyTweakResult } from './ecc';

@@ -1,8 +1,4 @@
-import ReactNativeCryptoLib, {
-  type RawSpec,
-} from './NativeReactNativeCryptoLib';
-
-const raw = ReactNativeCryptoLib as unknown as RawSpec;
+import { raw, toArrayBuffer } from './buffer';
 
 export type Curve = 'secp256k1' | 'nist256p1';
 
@@ -10,12 +6,6 @@ export type EcdsaSignature = {
   signature: Uint8Array;
   recId: number;
 };
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
-    ? (data.buffer as ArrayBuffer)
-    : (data.slice().buffer as ArrayBuffer);
-}
 
 export const ecdsa = {
   randomPrivate(curve: Curve = 'secp256k1'): Uint8Array {

@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "hmac.h"
+#include "memzero.h"
 #include "pbkdf2.h"
 #include "sha2.h"
 }
@@ -117,9 +118,13 @@ void hkdf(
     std::memcpy(out + produced, t, take);
     produced += take;
     std::memcpy(prev, t, HashLen);
+    memzero(t, sizeof(t));
     prevLen = HashLen;
     counter++;
   }
+  memzero(prk, sizeof(prk));
+  memzero(prev, sizeof(prev));
+  memzero(buf.data(), buf.size());
 }
 
 jsi::Value invoke_hkdf_sha256(
