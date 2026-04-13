@@ -51,6 +51,7 @@ example/vendor/
 # node.js
 #
 node_modules/
+package-lock.json
 npm-debug.log
 yarn-debug.log
 yarn-error.log
@@ -84,3 +85,7 @@ android/generated
 
 # React Native Nitro Modules
 nitrogen/
+
+# Claude Code
+.claude/settings.local.json
+.claude/*.lock
