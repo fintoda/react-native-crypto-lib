@@ -4,6 +4,7 @@ const unsupported = (_: Uint8Array): Uint8Array => {
   );
 };
 
+/** One-shot cryptographic digest functions. Each accepts arbitrary-length data and returns a fixed-size hash. */
 export const hash = {
   sha1: unsupported,
   sha256: unsupported,

@@ -1,0 +1,94 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/),
+and this project adheres to [Conventional Commits](https://www.conventionalcommits.org/).
+
+## [0.9.0] - 2026-04-12
+
+### Added
+
+- SLIP-39 Shamir secret sharing: `generate`, `generateGroups`, `combine`, `validateMnemonic`
+- Security hardening across all existing modules (`memzero` on all sensitive buffers)
+- CLAUDE.md with project conventions and architecture documentation
+
+### Fixed
+
+- Resolved undici CVE-2025-22 by pinning to 6.24.0
+
+### Changed
+
+- Updated Podfile.lock for SLIP-39 vendor sources
+
+## [0.8.0] - 2026-03-10
+
+### Changed
+
+- Complete rewrite with new native module architecture (JSI/Turbo Module)
+- Vendored trezor-crypto as the C cryptography backend
+- Synchronous, zero-copy ArrayBuffer API across JSI boundary
+
+### Fixed
+
+- Broken discussion URLs in CONTRIBUTING.md
+
+## [0.7.4] - 2025-12-15
+
+### Fixed
+
+- iOS RNG implementation
+- iOS Release build configuration
+- BIP-32 derivation
+- TypeScript type definitions
+- Example Android build
+
+## [0.5.4] - 2025-09-20
+
+### Fixed
+
+- iOS build issues
+
+### Changed
+
+- Migrated to New Architecture module
+
+## [0.5.3] - 2025-09-15
+
+### Fixed
+
+- iOS build issues
+
+## [0.5.1] - 2025-09-10
+
+### Fixed
+
+- Package `publishConfig.access` setting
+- Package name
+- Package `files` field
+
+## [0.5.0] - 2025-09-05
+
+### Added
+
+- Initial release
+- Hash functions: SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-512, Keccak-256, Keccak-512, RIPEMD-160, BLAKE256, BLAKE2b, BLAKE2s, Groestl-512
+- MAC: HMAC-SHA256, HMAC-SHA512
+- KDF: PBKDF2-SHA256, PBKDF2-SHA512, HKDF-SHA256, HKDF-SHA512
+- RNG: cryptographically secure random bytes, uint32, uniform
+- ECDSA: sign, verify, recover, ECDH (secp256k1, nist256p1)
+- Schnorr: BIP-340 sign/verify, key tweaking
+- Ed25519: sign/verify, X25519 key exchange
+- AES: CBC, CTR, GCM (256-bit)
+- BIP-39: mnemonic generation, validation, seed derivation
+- BIP-32: HD key derivation, serialization
+- ECC utilities: point arithmetic, private key tweaking
+- WebCrypto polyfill (`getRandomValues`)
+
+[0.9.0]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.7.4...v0.8.0
+[0.7.4]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.5.4...v0.7.4
+[0.5.4]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.5.1...v0.5.3
+[0.5.1]: https://github.com/fintoda/react-native-crypto-lib/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/fintoda/react-native-crypto-lib/releases/tag/v0.5.0

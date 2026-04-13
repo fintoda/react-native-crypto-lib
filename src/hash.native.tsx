@@ -1,10 +1,12 @@
 import { raw, toArrayBuffer } from './buffer';
+import { wrapNative } from './errors';
 
-const wrap =
-  (fn: (data: ArrayBuffer) => ArrayBuffer) =>
-  (data: Uint8Array): Uint8Array =>
-    new Uint8Array(fn(toArrayBuffer(data)));
+const wrap = (fn: (data: ArrayBuffer) => ArrayBuffer) =>
+  wrapNative(
+    (data: Uint8Array): Uint8Array => new Uint8Array(fn(toArrayBuffer(data)))
+  );
 
+/** One-shot cryptographic digest functions. Each accepts arbitrary-length data and returns a fixed-size hash. */
 export const hash = {
   sha1: wrap(raw.hash_sha1.bind(raw)),
   sha256: wrap(raw.hash_sha256.bind(raw)),

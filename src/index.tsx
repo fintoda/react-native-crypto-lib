@@ -1,3 +1,4 @@
+export { CryptoError } from './errors';
 export { hash } from './hash';
 export { kdf } from './kdf';
 export { mac } from './mac';

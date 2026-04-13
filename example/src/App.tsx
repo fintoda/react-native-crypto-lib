@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ScrollView, Text, View, StyleSheet } from 'react-native';
+import { ScrollView, Text, View, StyleSheet, Pressable } from 'react-native';
 import { runAllTests, type TestResult } from './testVectors';
+import Demo from './Demo';
 
-export default function App() {
+type Tab = 'tests' | 'demo';
+
+function TestVectors() {
   const [results, setResults] = useState<TestResult[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,7 +22,7 @@ export default function App() {
   const total = results.length;
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.header}>Crypto Test Vectors</Text>
 
       {error && <Text style={styles.error}>Fatal: {error}</Text>}
@@ -47,10 +50,68 @@ export default function App() {
   );
 }
 
+export default function App() {
+  const [tab, setTab] = useState<Tab>('tests');
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.tabs}>
+        <Pressable
+          style={[styles.tab, tab === 'tests' && styles.activeTab]}
+          onPress={() => setTab('tests')}
+        >
+          <Text
+            style={[styles.tabText, tab === 'tests' && styles.activeTabText]}
+          >
+            Test Vectors
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.tab, tab === 'demo' && styles.activeTab]}
+          onPress={() => setTab('demo')}
+        >
+          <Text
+            style={[styles.tabText, tab === 'demo' && styles.activeTabText]}
+          >
+            Usage Demo
+          </Text>
+        </Pressable>
+      </View>
+
+      {tab === 'tests' ? <TestVectors /> : <Demo />}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
+    paddingTop: 54,
+  },
+  tabs: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  activeTab: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#007AFF',
+  },
+  tabText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#888',
+  },
+  activeTabText: {
+    color: '#007AFF',
+  },
+  content: {
     padding: 16,
-    paddingTop: 64,
     paddingBottom: 32,
   },
   header: {

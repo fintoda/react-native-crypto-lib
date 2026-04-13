@@ -1,22 +1,20 @@
 import { raw, toArrayBuffer } from './buffer';
+import { wrapNative } from './errors';
 
 export type Bip39Strength = 128 | 160 | 192 | 224 | 256;
 
 export const bip39 = {
-  /** Returns an English BIP-39 mnemonic for the given entropy strength. */
-  generate(strength: Bip39Strength = 128): string {
-    return raw.bip39_generate(strength);
-  },
-  /** Builds a mnemonic from caller-provided entropy (16/20/24/28/32 bytes). */
-  fromEntropy(entropy: Uint8Array): string {
-    return raw.bip39_from_entropy(toArrayBuffer(entropy));
-  },
-  /** BIP-39 checksum + wordlist validation. */
-  validate(mnemonic: string): boolean {
-    return raw.bip39_check(mnemonic);
-  },
-  /** PBKDF2-HMAC-SHA512, 2048 rounds. Returns a 64-byte seed. */
-  toSeed(mnemonic: string, passphrase: string = ''): Uint8Array {
-    return new Uint8Array(raw.bip39_to_seed(mnemonic, passphrase));
-  },
+  generate: wrapNative((strength: Bip39Strength = 128): string =>
+    raw.bip39_generate(strength)
+  ),
+  fromEntropy: wrapNative((entropy: Uint8Array): string =>
+    raw.bip39_from_entropy(toArrayBuffer(entropy))
+  ),
+  validate: wrapNative((mnemonic: string): boolean =>
+    raw.bip39_check(mnemonic)
+  ),
+  toSeed: wrapNative(
+    (mnemonic: string, passphrase: string = ''): Uint8Array =>
+      new Uint8Array(raw.bip39_to_seed(mnemonic, passphrase))
+  ),
 };
