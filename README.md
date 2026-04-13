@@ -18,6 +18,9 @@ that don't need them.
 - **AES-256**: CBC (PKCS#7 or no padding), CTR, GCM with AAD.
 - **BIP-39** mnemonics and **BIP-32 / SLIP-10** HD derivation on
   secp256k1, nist256p1, and ed25519.
+- **SLIP-39** Shamir secret sharing: split a master secret into
+  threshold-of-N mnemonic shares (single or multi-group), recover from
+  shares, passphrase encryption, RS1024 checksum validation.
 - **`tiny-secp256k1@2.x` adapter** so `bitcoinjs-lib`, `bip32`, `ecpair`
   work out of the box without a WASM build.
 - **WebCrypto `getRandomValues` polyfill** for packages that expect a
@@ -87,6 +90,7 @@ underlying buffer; otherwise the wrapper makes one defensive slice.
 - [aes](#aes) — AES-256 CBC / CTR / GCM
 - [bip39](#bip39) — mnemonics
 - [bip32](#bip32) — HD derivation (SLIP-10)
+- [slip39](#slip39) — Shamir secret sharing
 - [webcrypto](#webcrypto) — getRandomValues polyfill
 - [Compatibility notes](#compatibility-notes)
 
@@ -374,6 +378,60 @@ type HDNode = {
   followed by 32 bytes of the Ed25519 public key — the same convention
   trezor-crypto uses. You typically pass `privateKey` into
   `ed25519.sign` rather than using the 33-byte form directly.
+
+## slip39
+
+[SLIP-39](https://github.com/satoshilabs/slips/blob/master/slip-0039.md)
+Shamir secret sharing — split a master secret into mnemonic shares that
+can be distributed for safekeeping.
+
+```ts
+import { slip39, type Slip39Group } from '@fintoda/react-native-crypto-lib';
+```
+
+### Single group (threshold-of-N)
+
+```ts
+const secret = new Uint8Array(16); // 16–32 bytes, even length
+// Split into 5 shares, any 3 recover the secret
+const shares: string[] = slip39.generate(secret, 'passphrase', 3, 5);
+
+// Recover from any 3 shares
+const recovered: Uint8Array = slip39.combine(
+  [shares[0], shares[2], shares[4]],
+  'passphrase',
+);
+```
+
+### Multi-group
+
+```ts
+// 2-of-3 groups; each group has its own member threshold
+const groups: string[][] = slip39.generateGroups(secret, 'passphrase', 2, [
+  { threshold: 2, count: 3 }, // group 0: 2-of-3
+  { threshold: 3, count: 5 }, // group 1: 3-of-5
+  { threshold: 1, count: 1 }, // group 2: 1-of-1 (backup)
+]);
+
+// Recover with shares from 2 groups
+const recovered = slip39.combine(
+  [...groups[0].slice(0, 2), groups[2][0]],
+  'passphrase',
+);
+```
+
+### API
+
+- `slip39.generate(masterSecret, passphrase?, threshold, shareCount, iterationExponent? = 1)` → `string[]`.
+  Returns `shareCount` SLIP-39 mnemonics. `masterSecret` must be 16–32
+  bytes (even). Passphrase encrypts the secret via a 4-round Feistel
+  cipher with PBKDF2-HMAC-SHA256 (10 000 × 2^exp iterations per round).
+- `slip39.generateGroups(masterSecret, passphrase?, groupThreshold, groups, iterationExponent? = 1)` → `string[][]`.
+  Two-level Shamir: `groups` is an array of `{ threshold, count }`.
+- `slip39.combine(mnemonics, passphrase?)` → `Uint8Array`.
+  Recover the master secret from enough shares (single or multi-group).
+- `slip39.validateMnemonic(mnemonic)` → `boolean`.
+  Wordlist + RS1024 checksum validation.
 
 ## webcrypto
 
