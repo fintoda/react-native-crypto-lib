@@ -1,79 +1,99 @@
 cmake_minimum_required(VERSION 3.4.1)
-project(CryptoLib)
+project(ReactNativeCryptoLib)
 
-set (CMAKE_VERBOSE_MAKEFILE ON)
-set (CMAKE_CXX_STANDARD 14)
+set (CMAKE_VERBOSE_MAKEFILE OFF)
 
-file(GLOB_RECURSE lib_crypto RELATIVE ${CMAKE_SOURCE_DIR}
-        ../crypto/*.c
+# Subset of vendor/trezor-crypto/crypto/ that we actually compile.
+# Keep this list in sync with ReactNativeCryptoLib.podspec.
+set(TREZOR_CRYPTO_SOURCES
+    ../vendor/trezor-crypto/crypto/memzero.c
+    ../vendor/trezor-crypto/crypto/sha2.c
+    ../vendor/trezor-crypto/crypto/sha3.c
+    ../vendor/trezor-crypto/crypto/ripemd160.c
+    ../vendor/trezor-crypto/crypto/blake256.c
+    ../vendor/trezor-crypto/crypto/blake2b.c
+    ../vendor/trezor-crypto/crypto/blake2s.c
+    ../vendor/trezor-crypto/crypto/groestl.c
+    ../vendor/trezor-crypto/crypto/hmac.c
+    ../vendor/trezor-crypto/crypto/pbkdf2.c
+    ../vendor/trezor-crypto/crypto/bignum.c
+    ../vendor/trezor-crypto/crypto/hasher.c
+    ../vendor/trezor-crypto/crypto/address.c
+    ../vendor/trezor-crypto/crypto/base58.c
+    ../vendor/trezor-crypto/crypto/hmac_drbg.c
+    ../vendor/trezor-crypto/crypto/rfc6979.c
+    ../vendor/trezor-crypto/crypto/secp256k1.c
+    ../vendor/trezor-crypto/crypto/nist256p1.c
+    ../vendor/trezor-crypto/crypto/ecdsa.c
+    ../vendor/trezor-crypto/crypto/curves.c
+    ../vendor/trezor-crypto/crypto/bip32.c
+    ../vendor/trezor-crypto/crypto/bip39.c
+    ../vendor/trezor-crypto/crypto/bip39_english.c
+    ../vendor/trezor-crypto/crypto/aes/aescrypt.c
+    ../vendor/trezor-crypto/crypto/aes/aeskey.c
+    ../vendor/trezor-crypto/crypto/aes/aestab.c
+    ../vendor/trezor-crypto/crypto/aes/aes_modes.c
+    ../vendor/trezor-crypto/crypto/aes/aesgcm.c
+    ../vendor/trezor-crypto/crypto/aes/gf128mul.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519-sha3.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519-keccak.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519-donna-impl-base.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519-donna-32bit-tables.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/ed25519-donna-basepoint-table.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/modm-donna-32bit.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-32bit.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-helpers.c
+    ../vendor/trezor-crypto/crypto/ed25519-donna/curve25519-donna-scalarmult-base.c
 )
 
-file(GLOB lib_secp256k1 RELATIVE ${CMAKE_SOURCE_DIR}
-        ../vendor/secp256k1-zkp/src/precomputed_ecmult.c
-        ../vendor/secp256k1-zkp/src/precomputed_ecmult_gen.c
-        ../vendor/secp256k1-zkp/src/secp256k1.c
+add_library(
+    fintoda-react-native-crypto-lib    STATIC
+    ../cpp/ReactNativeCryptoLibImpl.cpp
+    ../cpp/Hash.cpp
+    ../cpp/Mac.cpp
+    ../cpp/Kdf.cpp
+    ../cpp/Rng.cpp
+    ../cpp/Ecdsa.cpp
+    ../cpp/Schnorr.cpp
+    ../cpp/Ed25519.cpp
+    ../cpp/Ecc.cpp
+    ../cpp/Aes.cpp
+    ../cpp/Bip39.cpp
+    ../cpp/Bip32.cpp
+    ${TREZOR_CRYPTO_SOURCES}
 )
 
-add_library(react-native-crypto-lib            SHARED
-            ${lib_crypto}
-            ${lib_secp256k1}
-            ../cpp/react-native-crypto-lib.cpp
-            cpp-adapter.cpp
+set_target_properties(
+    fintoda-react-native-crypto-lib PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
 )
 
-# Specifies a path to native header files.
-include_directories(
-            ../cpp
-            ../crypto
-            ../crypto/aes
+target_include_directories(
+    fintoda-react-native-crypto-lib    PUBLIC
+    ../cpp
+    ../vendor/trezor-crypto/crypto
+    ../vendor/trezor-crypto/crypto/ed25519-donna
+    ../vendor/trezor-crypto/crypto/aes
 )
 
-target_compile_options(react-native-crypto-lib
-  PRIVATE
-    -std=gnu99
-    -W
-    -Wall
-    -Wextra
-    -Wimplicit-function-declaration
-    -Wredundant-decls
-    -Wstrict-prototypes
-    -Wundef
-    -Wshadow
-    -Wpointer-arith
-    -Wformat
-    -Wreturn-type
-    -Wsign-compare
-    -Wmultichar
-    -Wformat-nonliteral
-    -Winit-self
-    -Wuninitialized
-    -Wformat-security
-    -Wno-missing-braces
-    -Werror
-    -Wno-unused-function
-    -Wno-unused-parameter
-
-    -DUSE_MONERO=0
-
-    -DECMULT_GEN_PREC_BITS=4
-    -DECMULT_WINDOW_SIZE=8
-    -DENABLE_MODULE_GENERATOR
-    -DENABLE_MODULE_RECOVERY
-    -DENABLE_MODULE_SCHNORRSIG
-    -DENABLE_MODULE_EXTRAKEYS
-    -DSECP256K1_CONTEXT_SIZE=208
-    
-    -DSECP256K1_BUILD_BENCHMARK=OFF
-    -DSECP256K1_BUILD_TESTS=OFF
-    -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF
-    -DSECP256K1_BUILD_CTIME_TESTS=OFF
-    -DSECP256K1_BUILD_EXAMPLES=OFF
-
-    -D__BIONIC_NO_PAGE_SIZE_MACRO
+target_compile_definitions(
+    fintoda-react-native-crypto-lib    PRIVATE
+    USE_KECCAK=1
+    AES_VAR=1
 )
 
-if(ANDROID AND (ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64"))
-  target_link_options(react-native-crypto-lib PRIVATE
-    "-Wl,-z,max-page-size=16384"
-  )
-endif()
+target_compile_options(
+    fintoda-react-native-crypto-lib    PRIVATE
+    -fstack-protector-strong
+    -D_FORTIFY_SOURCE=2
+    -Wno-deprecated-volatile
+)
+
+target_link_libraries(
+    fintoda-react-native-crypto-lib    jsi
+    reactnative
+    react_codegen_ReactNativeCryptoLibSpec
+)

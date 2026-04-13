@@ -1,29 +1,15 @@
 {
   "name": "@fintoda/react-native-crypto-lib",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "description": "React Native wrapper for cryptographic functions, leveraging Trezor Crypto and secp256k1 libraries",
-  "source": "./src/index.ts",
-  "main": "./lib/commonjs/index.js",
-  "module": "./lib/module/index.js",
-  "exports": {
-    ".": {
-      "import": {
-        "types": "./lib/typescript/module/src/index.d.ts",
-        "default": "./lib/module/index.js"
-      },
-      "require": {
-        "types": "./lib/typescript/commonjs/src/index.d.ts",
-        "default": "./lib/commonjs/index.js"
-      }
-    }
-  },
+  "main": "./lib/module/index.js",
+  "types": "./lib/typescript/src/index.d.ts",
   "files": [
     "src",
     "lib",
     "android",
     "ios",
     "cpp",
-    "crypto",
     "vendor",
     "*.podspec",
     "react-native.config.js",
@@ -39,33 +25,30 @@
     "!**/.*"
   ],
   "scripts": {
-    "example": "yarn workspace react-native-crypto-lib-example",
-    "test": "jest",
-    "typecheck": "tsc",
-    "lint": "eslint \"**/*.{js,ts,tsx}\"",
+    "example": "yarn workspace @fintoda/react-native-crypto-lib-example",
     "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
-    "prepare": "bob build",
-    "release": "release-it"
+    "prepare": "bob build && node scripts/patch-codegen.js",
+    "postprepare": "sed -i.bak 's/^target_compile_reactnative_options/if(COMMAND target_compile_reactnative_options)\\n  target_compile_reactnative_options/' android/generated/jni/CMakeLists.txt && echo 'endif()' >> android/generated/jni/CMakeLists.txt && rm -f android/generated/jni/CMakeLists.txt.bak",
+    "typecheck": "tsc",
+    "test": "jest",
+    "release": "release-it --only-version",
+    "lint": "eslint \"**/*.{js,ts,tsx}\""
   },
   "keywords": [
     "react-native",
-    "ios",
-    "android",
     "crypto",
-    "trezor",
     "secp256k1",
-    "bitcoin",
-    "hash",
-    "sha",
-    "sha3",
-    "keccak",
-    "ripemd160",
+    "bip32",
+    "bip39",
+    "ecdsa",
+    "ed25519",
+    "schnorr",
+    "aes",
     "hmac",
     "pbkdf2",
-    "ecdsa",
-    "schnorr",
-    "bip32",
-    "bip39"
+    "trezor-crypto",
+    "ios",
+    "android"
   ],
   "repository": {
     "type": "git",
@@ -81,28 +64,32 @@
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
-    "@commitlint/config-conventional": "^19.6.0",
-    "@eslint/compat": "^1.2.7",
-    "@eslint/eslintrc": "^3.3.0",
-    "@eslint/js": "^9.22.0",
-    "@evilmartians/lefthook": "^1.5.0",
-    "@react-native/eslint-config": "^0.78.0",
-    "@release-it/conventional-changelog": "^9.0.2",
-    "@types/jest": "^29.5.5",
-    "@types/react": "^19.0.0",
-    "commitlint": "^19.6.1",
-    "del-cli": "^5.1.0",
-    "eslint": "^9.22.0",
-    "eslint-config-prettier": "^10.1.1",
-    "eslint-plugin-prettier": "^5.2.3",
-    "jest": "^29.7.0",
-    "prettier": "^3.0.3",
-    "react": "19.0.0",
-    "react-native": "0.78.2",
-    "react-native-builder-bob": "^0.40.13",
-    "release-it": "^17.10.0",
-    "turbo": "^1.10.7",
-    "typescript": "^5.2.2"
+    "@commitlint/config-conventional": "^20.5.0",
+    "@eslint/compat": "^2.0.3",
+    "@eslint/eslintrc": "^3.3.5",
+    "@eslint/js": "^10.0.1",
+    "@jest/globals": "^30.0.0",
+    "@react-native-community/cli": "20.1.0",
+    "@react-native/babel-preset": "0.85.0",
+    "@react-native/eslint-config": "0.85.0",
+    "@react-native/jest-preset": "0.85.0",
+    "@release-it/conventional-changelog": "^10.0.6",
+    "@types/react": "^19.2.0",
+    "commitlint": "^20.5.0",
+    "del-cli": "^7.0.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-ft-flow": "^3.0.11",
+    "eslint-plugin-prettier": "^5.5.5",
+    "jest": "^30.3.0",
+    "lefthook": "^2.1.4",
+    "prettier": "^3.8.1",
+    "react": "19.2.3",
+    "react-native": "0.85.0",
+    "react-native-builder-bob": "^0.41.0",
+    "release-it": "^19.2.4",
+    "turbo": "^2.8.21",
+    "typescript": "^6.0.2"
   },
   "peerDependencies": {
     "react": "*",
@@ -111,9 +98,41 @@
   "workspaces": [
     "example"
   ],
-  "packageManager": "yarn@3.6.1",
+  "packageManager": "yarn@4.11.0",
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ],
+      "codegen"
+    ]
+  },
+  "codegenConfig": {
+    "name": "ReactNativeCryptoLibSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "outputDir": {
+      "ios": "ios/generated",
+      "android": "android/generated"
+    },
+    "android": {
+      "javaPackageName": "com.fintoda.reactnativecryptolib"
+    },
+    "includesGeneratedCode": true
+  },
   "jest": {
-    "preset": "react-native",
+    "preset": "@react-native/jest-preset",
     "modulePathIgnorePatterns": [
       "<rootDir>/example/node_modules",
       "<rootDir>/lib/"
@@ -127,16 +146,13 @@
   "release-it": {
     "git": {
       "commitMessage": "chore: release ${version}",
-      "tagName": "v${version}",
-      "commit": false,
-      "tag": false,
-      "push": false
+      "tagName": "v${version}"
     },
     "npm": {
       "publish": true
     },
     "github": {
-      "release": false
+      "release": true
     },
     "plugins": {
       "@release-it/conventional-changelog": {
@@ -144,8 +160,7 @@
           "name": "angular"
         }
       }
-    },
-    "increment": false
+    }
   },
   "prettier": {
     "quoteProps": "consistent",
@@ -154,36 +169,15 @@
     "trailingComma": "es5",
     "useTabs": false
   },
-  "react-native-builder-bob": {
-    "source": "src",
-    "output": "lib",
-    "targets": [
-      [
-        "commonjs",
-        {
-          "esm": true
-        }
-      ],
-      [
-        "module",
-        {
-          "esm": true
-        }
-      ],
-      [
-        "typescript",
-        {
-          "project": "tsconfig.build.json"
-        }
-      ]
-    ]
-  },
   "create-react-native-library": {
-    "type": "legacy-module",
+    "type": "turbo-module",
     "languages": "cpp",
-    "version": "0.49.8"
-  },
-  "dependencies": {
-    "buffer": "^6.0.3"
+    "tools": [
+      "jest",
+      "lefthook",
+      "release-it",
+      "eslint"
+    ],
+    "version": "0.61.0"
   }
 }
