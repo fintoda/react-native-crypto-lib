@@ -98,6 +98,9 @@
   "workspaces": [
     "example"
   ],
+  "resolutions": {
+    "undici": "6.24.0"
+  },
   "packageManager": "yarn@4.11.0",
   "react-native-builder-bob": {
     "source": "src",
