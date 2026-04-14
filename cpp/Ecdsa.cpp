@@ -152,6 +152,9 @@ jsi::Value invoke_ecdsa_sign(
   int err = ecdsa_sign_digest(
     curve, priv.data(rt), digest.data(rt), out.data() + 1, &pby, nullptr);
   if (err != 0) {
+    // Signature bytes aren't secret, but partial state may correlate with
+    // the nonce k — scrub before surfacing the error.
+    memzero(out.data(), out.size());
     throw jsi::JSError(rt, "ecdsa_sign: signing failed");
   }
   out[0] = pby;

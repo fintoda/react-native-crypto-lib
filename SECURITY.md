@@ -38,6 +38,10 @@ The following are considered in scope for this cryptographic library:
 - Weak or predictable random number generation
 - Padding oracle or authentication bypass in AES operations
 
+### Side-channel considerations
+
+Constant-time properties for ECDSA/Schnorr/Ed25519/X25519 scalar operations, AES core rounds, and PKCS#7 padding validation are inherited from the vendored [trezor-crypto](https://github.com/trezor/trezor-firmware/tree/main/crypto) implementation. This library adds a constant-time PKCS#7 check at the JSI boundary and `memzero()` scrubbing of secret-bearing buffers on every exit path. Timing guarantees on the underlying primitives are only as strong as the platform's `memcmp`, compiler, and CPU — assume a local attacker with cache-timing capabilities is out of scope.
+
 The following are **out of scope**:
 
 - Vulnerabilities in the upstream React Native framework
