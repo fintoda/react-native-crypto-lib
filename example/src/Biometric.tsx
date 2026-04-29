@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import {
   secureKV,
+  biometric,
   hash,
   ecdsa,
   schnorr,
@@ -184,6 +185,47 @@ async function cleanup(): Promise<string> {
   return `Deleted ${KEY_BLOB}, ${KEY_SEED}, ${KEY_RAW}, ${KEY_WIN}`;
 }
 
+// --- biometric.* (standalone, UX-only) -------------------------------
+
+async function probeBiometricApiStatus(): Promise<string> {
+  // Sanity check: the standalone API's status() should return the same
+  // value as secureKV.biometricStatus() — same underlying check, just a
+  // different namespace.
+  const a = await biometric.status();
+  const b = await secureKV.biometricStatus();
+  if (a !== b) {
+    throw new Error(`status mismatch: biometric=${a} vs secureKV=${b}`);
+  }
+  return `Status: ${a} (matches secureKV.biometricStatus)`;
+}
+
+async function authenticateDefault(): Promise<string> {
+  const t0 = Date.now();
+  await biometric.authenticate();
+  return `Authenticated in ${Date.now() - t0}ms (default labels)`;
+}
+
+async function authenticateCustom(): Promise<string> {
+  const t0 = Date.now();
+  await biometric.authenticate({
+    title: 'Confirm action',
+    subtitle: 'Approve to continue with the demo',
+    cancelLabel: 'Not now',
+  });
+  return `Authenticated in ${Date.now() - t0}ms (custom labels)`;
+}
+
+async function authenticateCancelExpected(): Promise<string> {
+  // No assertion — the user is expected to tap cancel here. Result row
+  // turns yellow ("CANCELLED") via isCancel(); ergonomic for verifying
+  // the cancel path surfaces as a CryptoError, not a hard fail.
+  await biometric.authenticate({
+    subtitle: 'Tap Cancel to test the cancel path',
+    cancelLabel: 'Cancel (test)',
+  });
+  return 'No cancel observed — auth succeeded';
+}
+
 const STEPS: { id: string; label: string; fn: StepFn }[] = [
   {
     id: 'status',
@@ -241,6 +283,26 @@ const STEPS: { id: string; label: string; fn: StepFn }[] = [
     fn: signWindowedAgain,
   },
   { id: 'cleanup', label: '11. Delete all biometric items', fn: cleanup },
+  {
+    id: 'bio_status',
+    label: '12. biometric.status() — match with secureKV',
+    fn: probeBiometricApiStatus,
+  },
+  {
+    id: 'bio_auth_default',
+    label: '13. biometric.authenticate() — default copy',
+    fn: authenticateDefault,
+  },
+  {
+    id: 'bio_auth_custom',
+    label: '14. biometric.authenticate({...}) — custom copy',
+    fn: authenticateCustom,
+  },
+  {
+    id: 'bio_auth_cancel',
+    label: '15. biometric.authenticate() — tap Cancel',
+    fn: authenticateCancelExpected,
+  },
 ];
 
 // User-cancel detection. iOS Keychain returns errSecUserCanceled (-128)
@@ -289,20 +351,22 @@ export default function Biometric() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.header}>Biometric (Phase 1)</Text>
+      <Text style={styles.header}>Biometric</Text>
       <Text style={styles.subtitle}>
-        Each step exercises a `secureKV` entrypoint with{' '}
-        <Text style={styles.code}>accessControl: 'biometric'</Text>. iOS prompts
-        only on read / sign. Android (BiometricPrompt) prompts on every encrypt
-        / decrypt — provisioning will also show the prompt.
+        Steps 1-11 exercise `secureKV` with{' '}
+        <Text style={styles.code}>accessControl: 'biometric'</Text> — auth is
+        bound to a Keystore / Keychain operation. Steps 12-15 exercise the
+        standalone <Text style={styles.code}>biometric.*</Text> API — UX gate
+        only, no crypto binding. iOS prompts only on read / sign; Android
+        (BiometricPrompt) prompts on every encrypt / decrypt.
       </Text>
 
       {Platform.OS === 'android' && (
         <View style={styles.warn}>
           <Text style={styles.warnText}>
             Running on Android. BiometricPrompt requires API 28+ and an enrolled
-            fingerprint / face. Provisioning steps prompt too — seven prompts
-            total to run the full sequence.
+            fingerprint / face. Each non-windowed secureKV op prompts; the
+            standalone biometric.authenticate() prompts once per call.
           </Text>
         </View>
       )}
