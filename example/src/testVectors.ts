@@ -1201,6 +1201,14 @@ function secureKVTests(): TestResult[] {
     })
   );
 
+  // accessControl is reserved for future biometric gating; only 'none' is
+  // accepted today, anything else MUST be rejected up-front.
+  results.push(
+    throws('secureKV.set accessControl="biometric" rejected', () => {
+      secureKV.set(k('ac'), ascii('x'), 'biometric' as any);
+    })
+  );
+
   // Final cleanup so the next launch starts blank.
   try {
     secureKV.clear();
@@ -1556,6 +1564,179 @@ function secureKVSignTests(): TestResult[] {
   results.push(
     throws('secureKV.bip32.signEcdsa missing slot throws', () => {
       secureKV.bip32.signEcdsa(k('nope'), 'm', digest, 'secp256k1');
+    })
+  );
+
+  // ----- bip32 nist256p1 derivation + sign -----
+  results.push(
+    check('secureKV.bip32 nist256p1 matches standalone bip32+ecdsa', () => {
+      const path = "m/0'/1";
+      const root = bip32.fromSeed(bip32Seed, 'nist256p1');
+      const node = bip32.derive(root, path);
+      const refPub = ecdsa.getPublic(node.privateKey!, true, 'nist256p1');
+      const kvPub = secureKV.bip32.getPublicKey(k('vec1'), path, 'nist256p1');
+      if (!eq(kvPub, refPub)) return `pub mismatch: ${toHex(kvPub)}`;
+      const sig = secureKV.bip32.signEcdsa(
+        k('vec1'),
+        path,
+        digest,
+        'nist256p1'
+      );
+      return (
+        ecdsa.verify(refPub, sig.signature, digest, 'nist256p1') ||
+        'sig did not verify under derived nist256p1 pub'
+      );
+    })
+  );
+
+  // ----- uncompressed public keys -----
+  results.push(
+    check('secureKV.bip32.getPublicKey compact=false returns 65 bytes', () => {
+      const uncompressed = secureKV.bip32.getPublicKey(
+        k('vec1'),
+        bip32LeafPath,
+        'secp256k1',
+        false
+      );
+      if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
+      if (uncompressed[0] !== 0x04) return `prefix=${uncompressed[0]}`;
+      // Recompressing must match the compressed pub from the same slot.
+      const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
+      return (
+        toHex(recompressed) === bip32LeafPubCompressed ||
+        `recompressed=${toHex(recompressed)}`
+      );
+    })
+  );
+
+  results.push(
+    check('secureKV.raw.getPublicKey compact=false returns 65 bytes', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      secureKV.raw.setPrivate(k('rawunc'), priv, 'secp256k1');
+      const compact = secureKV.raw.getPublicKey(k('rawunc'));
+      const uncompressed = secureKV.raw.getPublicKey(k('rawunc'), false);
+      if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
+      const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
+      return eq(recompressed, compact) || 'compact vs uncompressed mismatch';
+    })
+  );
+
+  // ----- raw Schnorr (BIP-340, no taproot tweak) -----
+  results.push(
+    check('secureKV.raw.signSchnorr verifies under x-only pub', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      const xOnly = ecdsa.getPublic(priv, true, 'secp256k1').slice(1, 33);
+      secureKV.raw.setPrivate(k('rawschnorr'), priv, 'secp256k1');
+      const sig = secureKV.raw.signSchnorr(
+        k('rawschnorr'),
+        digest,
+        new Uint8Array(32)
+      );
+      return schnorr.verify(xOnly, sig, digest) || 'schnorr sig did not verify';
+    })
+  );
+
+  // ----- raw ECDH -----
+  results.push(
+    check('secureKV.raw.ecdh matches standalone ecdsa.ecdh', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      const counterPriv = ecdsa.randomPrivate('secp256k1');
+      const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
+      secureKV.raw.setPrivate(k('rawecdh'), priv, 'secp256k1');
+      const sharedFromKV = secureKV.raw.ecdh(k('rawecdh'), counterPub);
+      const sharedFromRef = ecdsa.ecdh(priv, counterPub, 'secp256k1');
+      return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
+    })
+  );
+
+  // ----- non-zero aux randomness exercises the optional-arg path -----
+  results.push(
+    check('secureKV.bip32.signSchnorr non-zero aux verifies', () => {
+      const aux = rng.bytes(32);
+      const compressed = secureKV.bip32.getPublicKey(
+        k('bip86'),
+        bip86Path,
+        'secp256k1'
+      );
+      const xOnly = compressed.slice(1, 33);
+      const sig = secureKV.bip32.signSchnorr(
+        k('bip86'),
+        bip86Path,
+        digest,
+        aux
+      );
+      return (
+        schnorr.verify(xOnly, sig, digest) ||
+        'schnorr sig with aux did not verify'
+      );
+    })
+  );
+
+  // ----- taproot with a merkle root (script-path commitment) -----
+  results.push(
+    check(
+      'secureKV.bip32.signSchnorrTaproot with merkleRoot verifies under tweaked pub',
+      () => {
+        const merkleRoot = hash.sha256(ascii('dummy script tree root'));
+        const compressed = secureKV.bip32.getPublicKey(
+          k('bip86'),
+          bip86Path,
+          'secp256k1'
+        );
+        const xOnly = compressed.slice(1, 33);
+        const tweaked = schnorr.tweakPublic(xOnly, merkleRoot).pub;
+        const sig = secureKV.bip32.signSchnorrTaproot(
+          k('bip86'),
+          bip86Path,
+          digest,
+          merkleRoot
+        );
+        return (
+          schnorr.verify(tweaked, sig, digest) ||
+          'taproot sig with merkleRoot did not verify'
+        );
+      }
+    )
+  );
+
+  // ----- scalar validation on raw secp256k1 slot -----
+  results.push(
+    throws('secureKV.raw.setPrivate zero scalar rejected (secp256k1)', () => {
+      secureKV.raw.setPrivate(k('zero'), new Uint8Array(32), 'secp256k1');
+    })
+  );
+
+  results.push(
+    throws(
+      'secureKV.raw.setPrivate out-of-range scalar rejected (secp256k1)',
+      () => {
+        const all0xff = new Uint8Array(32).fill(0xff);
+        secureKV.raw.setPrivate(k('toobig'), all0xff, 'secp256k1');
+      }
+    )
+  );
+
+  // ----- remaining cross-slot mismatches -----
+  results.push(
+    throws('secureKV.raw op on a generic blob slot throws', () => {
+      secureKV.set(k('blob2'), ascii('x'));
+      secureKV.raw.signEcdsa(k('blob2'), digest);
+    })
+  );
+
+  results.push(
+    throws('secureKV.bip32 op on a RAW slot throws', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      secureKV.raw.setPrivate(k('rawXbip'), priv, 'secp256k1');
+      secureKV.bip32.getPublicKey(k('rawXbip'), 'm', 'secp256k1');
+    })
+  );
+
+  results.push(
+    throws('secureKV.get on a RAW slot throws', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      secureKV.raw.setPrivate(k('rawXget'), priv, 'secp256k1');
+      secureKV.get(k('rawXget'));
     })
   );
 
