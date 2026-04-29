@@ -480,16 +480,134 @@ import {
   key landed in TEE / StrongBox vs. software keystore.
 
 `key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
-
-### What it stores, where, and how
-
-| platform | mechanism |
-|---|---|
-| iOS | `kSecClassGenericPassword` Keychain items, `service = "<bundleId>.cryptolib.kv"`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. |
-| Android | AES-256-GCM master key in AndroidKeystore (alias `cryptolib.kv.master.<applicationId>`). Each value is sealed individually and written to `<filesDir>/secure_kv/<sha256(key)>.bin`. |
-
 The store is per-app — two apps using this library on the same device
-have independent namespaces.
+have independent namespaces. Single-process only on Android: don't enable
+multi-process for the host app if you rely on `secureKV`.
+
+```ts
+import { rng, secureKV } from '@fintoda/react-native-crypto-lib';
+
+// One-time provision
+const seed = rng.bytes(32);
+secureKV.set('wallet.seed', seed);
+seed.fill(0);
+
+// Later
+const restored = secureKV.get('wallet.seed');
+if (!restored) throw new Error('seed missing');
+```
+
+### How it works
+
+The implementation is intentionally small and auditable. Both backends
+share the same C++ JSI thunk layer (`cpp/SecureKV.cpp`), which validates
+the key charset / length and the 64 KiB value cap before forwarding to a
+platform `SecureKVBackend`.
+
+#### iOS — Keychain
+
+Each value becomes one `kSecClassGenericPassword` item with these
+attributes:
+
+| attribute | value |
+|---|---|
+| `kSecAttrService` | `"<bundleId>.cryptolib.kv"` |
+| `kSecAttrAccount` | the user-supplied key name |
+| `kSecAttrAccessible` | `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` |
+| `kSecAttrSynchronizable` | unset (default `false` — never iCloud-synced) |
+| `kSecAttrAccessGroup` | unset (host app's default group only) |
+
+The accessibility class chosen is the strictest one that's still usable
+for UI flows: the item is decryptable only while the device is unlocked
+and *only on the device that wrote it* — restoring the encrypted backup
+to a new phone leaves the item unreadable. Background tasks running
+while the screen is locked cannot read; if you need that, switch to
+`AfterFirstUnlockThisDeviceOnly` in a fork (we picked the stricter
+default deliberately).
+
+`set` is `SecItemDelete` then `SecItemAdd` — overwrite-by-recreate so
+that an item written under an older accessibility attribute (e.g. before
+the library upgraded its default) doesn't silently retain it via
+`SecItemUpdate`.
+
+#### Android — AndroidKeystore + sealed blobs
+
+There is no Keychain-equivalent KV store on Android, so the library
+brings its own thin one. A single AES-256-GCM master key lives in
+AndroidKeystore under alias `cryptolib.kv.master.<applicationId>`,
+generated lazily on first use with:
+
+```kotlin
+KeyGenParameterSpec.Builder(alias, ENCRYPT or DECRYPT)
+  .setBlockModes(BLOCK_MODE_GCM)
+  .setEncryptionPaddings(ENCRYPTION_PADDING_NONE)
+  .setKeySize(256)
+  .setRandomizedEncryptionRequired(true)
+  .build()
+```
+
+`setRandomizedEncryptionRequired(true)` means the platform supplies a
+fresh random IV per `Cipher.init(ENCRYPT_MODE)` and rejects any attempt
+by us to provide one — the only way to use this key is the safe one.
+
+Each value is sealed independently and stored as a single file at
+`<filesDir>/secure_kv/<sha256(keyName)>.bin`:
+
+```
++-----------+------------------------------+----------+
+| IV (12 B) | AES-GCM(plaintext)           | tag (16) |
++-----------+------------------------------+----------+
+
+plaintext =
+  +--------------+---------------------+----------------+
+  | keyLen (4 B  | UTF-8 keyName       | value bytes    |
+  | big-endian)  | (keyLen bytes)      |                |
+  +--------------+---------------------+----------------+
+```
+
+Embedding the key name **inside** the encrypted plaintext lets `list()`
+recover original (case-preserving) names by decrypting each blob,
+without keeping a sidecar index file that would have to be kept atomic
+with the store. `get()` additionally verifies that the recovered key
+name matches the requested one as defence-in-depth on top of GCM
+authentication.
+
+Writes go through `<file>.tmp` followed by `renameTo`, so a crash
+mid-write leaves either the previous blob or the new one — never a
+half-written file. `set`, `delete`, and `clear` run under the same JVM
+monitor that guards master-key creation so concurrent writers (in the
+unlikely event there are any) can't interleave.
+
+When the master key has been invalidated by the OS — typically after
+factory reset, or on some OEM ROMs after the user removes the device
+screen lock — `Cipher.init` throws `KeyPermanentlyInvalidatedException`
+or `UnrecoverableKeyException`. The library catches these specifically
+and surfaces them as `SecureKVUnavailableError`. Single-blob auth
+failures (`AEADBadTagException`, `BadPaddingException`) are treated as
+orphans: `get` rejects them as unavailable, while `list` skips just the
+bad one and continues — a wiped store still surfaces as a single
+unavailable error rather than as a misleading empty list.
+
+#### Where hardware backing actually applies
+
+`isHardwareBacked()` reports the OS's view of where the master key
+material physically lives:
+
+| device class | typical backing |
+|---|---|
+| Pixel 3+ / Samsung S20+ with StrongBox | dedicated security chip (StrongBox) |
+| most Android ≥ 7 | TEE (Trusty / Qualcomm SEE) — separate execution environment in the SoC |
+| old / emulator / no TEE | software keystore, encrypted with a system master key on disk |
+
+iOS always reports `true`: every Keychain item with a `*ThisDeviceOnly`
+accessibility class is encrypted using a key derived from the Secure
+Enclave UID, which never leaves silicon.
+
+The library does **not** refuse to operate on software-keystore devices
+— that would break emulators and old hardware unnecessarily. Inspect
+`isHardwareBacked()` if you want to make a product decision (e.g. force
+the user to set up a screen lock first), but the library itself treats
+the answer as informational.
 
 ### Durability — read this before storing anything you cannot recover
 
