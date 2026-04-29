@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { ScrollView, Text, View, StyleSheet, Pressable } from 'react-native';
 import { runAllTests, type TestResult } from './testVectors';
 import Demo from './Demo';
+import Biometric from './Biometric';
 
-type Tab = 'tests' | 'demo';
+type Tab = 'tests' | 'demo' | 'biometric';
 
 function TestVectors() {
   const [results, setResults] = useState<TestResult[]>([]);
@@ -74,9 +75,24 @@ export default function App() {
             Usage Demo
           </Text>
         </Pressable>
+        <Pressable
+          style={[styles.tab, tab === 'biometric' && styles.activeTab]}
+          onPress={() => setTab('biometric')}
+        >
+          <Text
+            style={[
+              styles.tabText,
+              tab === 'biometric' && styles.activeTabText,
+            ]}
+          >
+            Biometric
+          </Text>
+        </Pressable>
       </View>
 
-      {tab === 'tests' ? <TestVectors /> : <Demo />}
+      {tab === 'tests' && <TestVectors />}
+      {tab === 'demo' && <Demo />}
+      {tab === 'biometric' && <Biometric />}
     </View>
   );
 }
