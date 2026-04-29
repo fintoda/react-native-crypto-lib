@@ -8,7 +8,7 @@ import { type Curve, type EcdsaSignature } from './ecdsa';
  */
 export type AccessControlOptions =
   | { accessControl: 'none' }
-  | { accessControl: 'biometric' };
+  | { accessControl: 'biometric'; validityWindow?: number };
 
 export type AccessControl = AccessControlOptions['accessControl'];
 

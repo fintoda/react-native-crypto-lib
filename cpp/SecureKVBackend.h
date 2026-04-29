@@ -13,8 +13,9 @@ namespace facebook::react::cryptolib {
 enum class AccessControl : uint8_t {
   // No prompt; item is readable while the device is unlocked.
   None = 0,
-  // Requires a biometric prompt (Face ID / Touch ID / fingerprint) on every
-  // read. Phase 1 = per-call only; session-window support comes later.
+  // Requires a biometric prompt (Face ID / Touch ID / fingerprint).
+  // Pair with a `validityWindow` (seconds) to authorise N seconds of
+  // subsequent reads after one prompt; 0 means per-call.
   Biometric = 1,
 };
 
@@ -58,7 +59,8 @@ class SecureKVBackend {
     const std::string& key,
     const uint8_t* data,
     size_t len,
-    AccessControl ac
+    AccessControl ac,
+    uint32_t validityWindowSec  // ignored when ac == None
   );
   static std::optional<std::vector<uint8_t>> get(const std::string& key);
   static bool has(const std::string& key);

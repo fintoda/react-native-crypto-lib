@@ -29,10 +29,9 @@ bool isValidKeyChar(char c) {
   throw jsi::JSError(rt, std::string(op) + ": " + e.what());
 }
 
-// Parses the JS-side accessControl string. Phase 1 accepts 'none' and
-// 'biometric'; the schema is forward-compatible with future variants
-// (e.g. 'biometric_or_passcode') because unknown values are rejected
-// here rather than silently ignored.
+// Parses the JS-side accessControl string. The schema is forward-compatible
+// with future variants (e.g. 'biometric_or_passcode') because unknown
+// values are rejected here rather than silently ignored.
 AccessControl parseAccessControl(
   jsi::Runtime& rt, const char* op, const std::string& s
 ) {
@@ -40,6 +39,28 @@ AccessControl parseAccessControl(
   if (s == "biometric") return AccessControl::Biometric;
   throw jsi::JSError(
     rt, std::string(op) + ": unknown accessControl '" + s + "'");
+}
+
+uint32_t parseValidityWindow(
+  jsi::Runtime& rt,
+  const char* op,
+  const jsi::Value* args,
+  size_t count,
+  size_t index
+) {
+  if (count <= index) return 0;
+  if (args[index].isUndefined() || args[index].isNull()) return 0;
+  if (!args[index].isNumber()) {
+    throw jsi::JSError(
+      rt, std::string(op) + ": validityWindow must be a number");
+  }
+  double v = args[index].asNumber();
+  if (v < 0 || v > static_cast<double>(UINT32_MAX) ||
+      v != static_cast<double>(static_cast<uint32_t>(v))) {
+    throw jsi::JSError(
+      rt, std::string(op) + ": validityWindow must be a non-negative integer");
+  }
+  return static_cast<uint32_t>(v);
 }
 
 void requireValidKey(jsi::Runtime& rt, const char* op, const std::string& key) {
@@ -68,9 +89,11 @@ jsi::Value invoke_set(
     std::string acStr =
       requireStringAt(rt, "secure_kv_set", "accessControl", args, count, 2);
     AccessControl ac = parseAccessControl(rt, "secure_kv_set", acStr);
+    uint32_t window =
+      parseValidityWindow(rt, "secure_kv_set", args, count, 3);
     auto wrapped = wrapBlobSlot(safeData(rt, value), len);
     try {
-      SecureKVBackend::set(key, wrapped.data(), wrapped.size(), ac);
+      SecureKVBackend::set(key, wrapped.data(), wrapped.size(), ac, window);
     } catch (const std::exception& e) {
       memzero(wrapped.data(), wrapped.size());
       wrap(rt, "secure_kv_set", e);
@@ -212,7 +235,7 @@ jsi::Value invoke_biometric_status(
 }  // namespace
 
 void registerSecureKVMethods(MethodMap& map) {
-  map.push_back({"secure_kv_set",                3, invoke_set});
+  map.push_back({"secure_kv_set",                4, invoke_set});
   map.push_back({"secure_kv_get",                1, invoke_get});
   map.push_back({"secure_kv_has",                1, invoke_has});
   map.push_back({"secure_kv_delete",             1, invoke_delete});

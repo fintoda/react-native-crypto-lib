@@ -5,21 +5,22 @@ import { wrapNativeAsync } from './errors';
 
 /**
  * Per-item access-control gating for secureKV. Discriminated union so
- * future variants (passcode-only, biometric-or-passcode, validity
- * windows) can be added without breaking existing call sites — they
- * will appear as additional members of the `accessControl` discriminator.
+ * future variants (passcode-only, biometric-or-passcode, …) can be
+ * added without breaking existing call sites.
  *
  * - `'none'` — no prompt. Item is readable while the device is unlocked.
- * - `'biometric'` — every read triggers a system biometric prompt
- *   (Face ID / Touch ID / fingerprint). On iOS, the item is bound to
- *   `kSecAccessControlBiometryCurrentSet`, so re-enrolling biometrics
- *   invalidates the item. **Android support lands in a future release**;
- *   provisioning a key with `'biometric'` on Android currently rejects
- *   with a clear error.
+ * - `'biometric'` — reads trigger a system biometric prompt (Face ID /
+ *   Touch ID / fingerprint). The item is bound to "current biometric
+ *   set" semantics on both platforms, so re-enrolling biometrics
+ *   invalidates the item.
+ *   - `validityWindow` (seconds, default `0` = per-call) — after one
+ *     successful prompt, subsequent reads of this item within the
+ *     window are silent. Useful for batch operations (signing N inputs
+ *     of a tx in a row). Set to `0` to require the prompt every time.
  */
 export type AccessControlOptions =
   | { accessControl: 'none' }
-  | { accessControl: 'biometric' };
+  | { accessControl: 'biometric'; validityWindow?: number };
 
 /** Legacy single-string alias of `AccessControl`. Kept as a type-only
  *  re-export for callers that read just the discriminator value. */
@@ -36,6 +37,10 @@ export type BiometricStatus =
 
 const DEFAULT_AC: AccessControlOptions = { accessControl: 'none' };
 
+function windowOf(opts: AccessControlOptions): number {
+  return opts.accessControl === 'biometric' ? (opts.validityWindow ?? 0) : 0;
+}
+
 // --- generic blob slot (tag 0x00) ------------------------------------------
 
 const set = wrapNativeAsync(
@@ -44,7 +49,12 @@ const set = wrapNativeAsync(
     value: Uint8Array,
     options: AccessControlOptions = DEFAULT_AC
   ): Promise<void> => {
-    await raw.secure_kv_set(key, toArrayBuffer(value), options.accessControl);
+    await raw.secure_kv_set(
+      key,
+      toArrayBuffer(value),
+      options.accessControl,
+      windowOf(options)
+    );
   }
 );
 
@@ -91,7 +101,8 @@ const bip32_setSeed = wrapNativeAsync(
     await raw.secure_kv_bip32_set_seed(
       alias,
       toArrayBuffer(seed),
-      options.accessControl
+      options.accessControl,
+      windowOf(options)
     );
   }
 );
@@ -215,7 +226,8 @@ const raw_setPrivate = wrapNativeAsync(
       alias,
       toArrayBuffer(priv),
       curve,
-      options.accessControl
+      options.accessControl,
+      windowOf(options)
     );
   }
 );

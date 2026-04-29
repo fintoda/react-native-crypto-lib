@@ -90,11 +90,17 @@ class SecureKVBiometricException(msg: String) : RuntimeException(msg)
 object SecureKVBridge {
   private const val ANDROID_KEYSTORE = "AndroidKeyStore"
   private const val MASTER_KEY_PREFIX = "cryptolib.kv.master."
+  // Biometric master keys are sub-keyed by validity window (seconds).
+  // E.g. "cryptolib.kv.master.bio.0." for per-call, "...bio.60." for
+  // 60-second sessions. Lazy-create on first use of each window.
   private const val MASTER_KEY_BIO_PREFIX = "cryptolib.kv.master.bio."
   private const val DIR_NAME = "secure_kv"
   private const val IV_LEN = 12
   private const val TAG_BITS = 128
   private const val VARIANT_LEN = 1
+  // Biometric blobs additionally carry a 4-byte BE window (seconds)
+  // immediately after the variant byte. Non-biometric blobs do not.
+  private const val WINDOW_LEN = 4
 
   // Mirrors cpp/SecureKVBackend.h's AccessControl enum.
   private const val ACCESS_CONTROL_NONE: Int = 0
@@ -264,10 +270,11 @@ object SecureKVBridge {
 
   // --- Storage layout -------------------------------------------------------
 
-  private fun masterAlias(variant: Int): String {
+  private fun masterAlias(variant: Int, validityWindowSec: Int): String {
     val pkg = appContext().packageName
     return when (variant) {
-      ACCESS_CONTROL_BIOMETRIC -> "$MASTER_KEY_BIO_PREFIX$pkg"
+      ACCESS_CONTROL_BIOMETRIC ->
+        "$MASTER_KEY_BIO_PREFIX$validityWindowSec.$pkg"
       else -> "$MASTER_KEY_PREFIX$pkg"
     }
   }
@@ -336,10 +343,13 @@ object SecureKVBridge {
     }
   }
 
-  private fun getOrCreateMasterKey(variant: Int): SecretKey {
+  private fun getOrCreateMasterKey(
+    variant: Int,
+    validityWindowSec: Int
+  ): SecretKey {
     synchronized(lock) {
       val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-      val alias = masterAlias(variant)
+      val alias = masterAlias(variant, validityWindowSec)
       val existing = ks.getKey(alias, null) as? SecretKey
       if (existing != null) return existing
 
@@ -367,19 +377,29 @@ object SecureKVBridge {
         // SecureKVUnavailableError on next read.
         builder.setInvalidatedByBiometricEnrollment(true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-          // Per-call biometric: 0-second validity, AUTH_BIOMETRIC_STRONG
-          // explicitly excludes device-credential fallback.
+          // validityWindowSec=0 → per-call. >0 → after one prompt the
+          // key is usable for that many seconds without re-auth.
+          // AUTH_BIOMETRIC_STRONG excludes device-credential fallback.
           builder.setUserAuthenticationParameters(
-            0, KeyProperties.AUTH_BIOMETRIC_STRONG
+            validityWindowSec, KeyProperties.AUTH_BIOMETRIC_STRONG
           )
         } else {
-          // API 28-29 lacks setUserAuthenticationParameters; -1 means
-          // "auth required for every operation". Note: any device unlock
-          // also counts as auth on this older API, so we additionally
-          // gate via BiometricPrompt at the call site to enforce
-          // biometric-specifically.
+          // API 28-29 lacks setUserAuthenticationParameters. The
+          // closest legacy equivalent is
+          // setUserAuthenticationValidityDurationSeconds(N): N=-1 means
+          // per-operation, N>0 means "any device unlock counts as auth
+          // for N seconds". The latter is laxer than what we want
+          // (biometric-only) but it's the best Keystore can do here;
+          // we still gate the actual unlocking event via BiometricPrompt
+          // so the prompt itself is biometric.
           @Suppress("DEPRECATION")
-          builder.setUserAuthenticationValidityDurationSeconds(-1)
+          if (validityWindowSec <= 0) {
+            builder.setUserAuthenticationValidityDurationSeconds(-1)
+          } else {
+            builder.setUserAuthenticationValidityDurationSeconds(
+              validityWindowSec
+            )
+          }
         }
       }
 
@@ -498,6 +518,48 @@ object SecureKVBridge {
       ?: throw SecureKVBiometricException("$op: prompt resolved with no cipher")
   }
 
+  /**
+   * Decrypts a biometric-protected blob, prompting only when the
+   * Keystore-side validity window has expired (or for keys created
+   * with windowSec=0 = per-call). Within the window we just call
+   * doFinal directly — Keystore tracks the window itself, no need
+   * for our own timer.
+   */
+  private fun decryptBiometric(
+    masterKey: SecretKey, iv: ByteArray, sealed: ByteArray
+  ): ByteArray {
+    fun fresh(): Cipher {
+      val c = Cipher.getInstance("AES/GCM/NoPadding")
+      try {
+        c.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(TAG_BITS, iv))
+      } catch (e: KeyPermanentlyInvalidatedException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+      return c
+    }
+
+    val firstAttempt = fresh()
+    return try {
+      firstAttempt.doFinal(sealed)
+    } catch (_: UserNotAuthenticatedException) {
+      // Window expired or per-call key. Re-create cipher (the failed
+      // doFinal may have left state) and authenticate under the prompt.
+      val cipher = fresh()
+      val authed = runBiometricPrompt(cipher, "secureKV.get")
+      try {
+        authed.doFinal(sealed)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+    } catch (e: KeyPermanentlyInvalidatedException) {
+      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    } catch (e: GeneralSecurityException) {
+      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    }
+  }
+
   // --- Blob format ----------------------------------------------------------
 
   private fun encodePlain(key: String, value: ByteArray): ByteArray {
@@ -528,28 +590,60 @@ object SecureKVBridge {
 
   private data class ParsedBlob(
     val variant: Int,
+    val validityWindowSec: Int,  // 0 for non-biometric
     val iv: ByteArray,
     val sealed: ByteArray
   )
 
   private fun parseBlob(blob: ByteArray): ParsedBlob {
-    val minLen = VARIANT_LEN + IV_LEN + TAG_BITS / 8
-    if (blob.size < minLen) {
+    if (blob.size < VARIANT_LEN + IV_LEN + TAG_BITS / 8) {
       throw SecureKVUnavailableException("unavailable: blob truncated")
     }
     val variant = blob[0].toInt() and 0xff
-    if (variant != ACCESS_CONTROL_NONE && variant != ACCESS_CONTROL_BIOMETRIC) {
-      throw SecureKVUnavailableException("unavailable: unknown blob variant $variant")
+    when (variant) {
+      ACCESS_CONTROL_NONE -> {
+        val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
+        val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
+        return ParsedBlob(variant, 0, iv, sealed)
+      }
+      ACCESS_CONTROL_BIOMETRIC -> {
+        val withWindow =
+          VARIANT_LEN + WINDOW_LEN + IV_LEN + TAG_BITS / 8
+        if (blob.size < withWindow) {
+          throw SecureKVUnavailableException(
+            "unavailable: biometric blob truncated"
+          )
+        }
+        val window =
+          ((blob[1].toInt() and 0xff) shl 24) or
+          ((blob[2].toInt() and 0xff) shl 16) or
+          ((blob[3].toInt() and 0xff) shl 8) or
+          (blob[4].toInt() and 0xff)
+        val iv = blob.copyOfRange(
+          VARIANT_LEN + WINDOW_LEN,
+          VARIANT_LEN + WINDOW_LEN + IV_LEN
+        )
+        val sealed = blob.copyOfRange(
+          VARIANT_LEN + WINDOW_LEN + IV_LEN, blob.size
+        )
+        return ParsedBlob(variant, window, iv, sealed)
+      }
+      else ->
+        throw SecureKVUnavailableException(
+          "unavailable: unknown blob variant $variant"
+        )
     }
-    val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
-    val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
-    return ParsedBlob(variant, iv, sealed)
   }
 
   // --- Public API ----------------------------------------------------------
 
   @JvmStatic
-  fun set(key: String, value: ByteArray, accessControl: Int) {
+  fun set(
+    key: String,
+    value: ByteArray,
+    accessControl: Int,
+    validityWindowSec: Int
+  ) {
     assertSingleProcess()
     if (accessControl != ACCESS_CONTROL_NONE &&
       accessControl != ACCESS_CONTROL_BIOMETRIC
@@ -558,8 +652,18 @@ object SecureKVBridge {
         "secureKV: unknown accessControl variant $accessControl"
       )
     }
+    val window = if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
+      if (validityWindowSec < 0) {
+        throw IllegalArgumentException(
+          "secureKV: validityWindow must be >= 0 (got $validityWindowSec)"
+        )
+      }
+      validityWindowSec
+    } else {
+      0
+    }
     synchronized(lock) {
-      val masterKey = getOrCreateMasterKey(accessControl)
+      val masterKey = getOrCreateMasterKey(accessControl, window)
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")
       try {
         cipher.init(Cipher.ENCRYPT_MODE, masterKey)
@@ -587,10 +691,19 @@ object SecureKVBridge {
         )
       }
 
-      val out = ByteArray(VARIANT_LEN + iv.size + sealed.size)
+      val headerLen =
+        if (accessControl == ACCESS_CONTROL_BIOMETRIC) VARIANT_LEN + WINDOW_LEN
+        else VARIANT_LEN
+      val out = ByteArray(headerLen + iv.size + sealed.size)
       out[0] = accessControl.toByte()
-      System.arraycopy(iv, 0, out, VARIANT_LEN, iv.size)
-      System.arraycopy(sealed, 0, out, VARIANT_LEN + iv.size, sealed.size)
+      if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
+        out[1] = ((window ushr 24) and 0xff).toByte()
+        out[2] = ((window ushr 16) and 0xff).toByte()
+        out[3] = ((window ushr 8) and 0xff).toByte()
+        out[4] = (window and 0xff).toByte()
+      }
+      System.arraycopy(iv, 0, out, headerLen, iv.size)
+      System.arraycopy(sealed, 0, out, headerLen + iv.size, sealed.size)
 
       val file = blobFile(key)
       val tmp = File(file.parentFile, "${file.name}.tmp")
@@ -613,28 +726,25 @@ object SecureKVBridge {
     if (!file.isFile) return null
     val parsed = parseBlob(file.readBytes())
 
-    val masterKey = getOrCreateMasterKey(parsed.variant)
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    try {
-      cipher.init(
-        Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(TAG_BITS, parsed.iv)
-      )
-    } catch (e: KeyPermanentlyInvalidatedException) {
-      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-    } catch (e: GeneralSecurityException) {
-      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-    }
+    val masterKey = getOrCreateMasterKey(
+      parsed.variant, parsed.validityWindowSec
+    )
 
-    val ready = if (parsed.variant == ACCESS_CONTROL_BIOMETRIC) {
-      runBiometricPrompt(cipher, "secureKV.get")
+    val plain = if (parsed.variant == ACCESS_CONTROL_BIOMETRIC) {
+      decryptBiometric(masterKey, parsed.iv, parsed.sealed)
     } else {
-      cipher
-    }
-
-    val plain = try {
-      ready.doFinal(parsed.sealed)
-    } catch (e: GeneralSecurityException) {
-      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      try {
+        cipher.init(
+          Cipher.DECRYPT_MODE, masterKey,
+          GCMParameterSpec(TAG_BITS, parsed.iv)
+        )
+        cipher.doFinal(parsed.sealed)
+      } catch (e: KeyPermanentlyInvalidatedException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
     }
 
     val (storedKey, value) = decodePlain(plain)
@@ -686,7 +796,7 @@ object SecureKVBridge {
       ?: return ""
 
     val nonBioMaster = try {
-      getOrCreateMasterKey(ACCESS_CONTROL_NONE)
+      getOrCreateMasterKey(ACCESS_CONTROL_NONE, 0)
     } catch (e: GeneralSecurityException) {
       throw SecureKVUnavailableException("unavailable: ${e.message}", e)
     }
@@ -781,7 +891,7 @@ object SecureKVBridge {
   fun isHardwareBacked(): Boolean {
     assertSingleProcess()
     return try {
-      val masterKey = getOrCreateMasterKey(ACCESS_CONTROL_NONE)
+      val masterKey = getOrCreateMasterKey(ACCESS_CONTROL_NONE, 0)
       val factory = SecretKeyFactory.getInstance(masterKey.algorithm, ANDROID_KEYSTORE)
       val info = factory.getKeySpec(masterKey, KeyInfo::class.java) as KeyInfo
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

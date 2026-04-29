@@ -16,6 +16,48 @@
 namespace facebook::react::cryptolib {
 namespace {
 
+// Per-process cache of authenticated LAContext objects, keyed by the
+// secureKV alias. Within a successful LAContext's
+// touchIDAuthenticationAllowableReuseDuration window, iOS skips the
+// biometric prompt for any SecItemCopyMatching that takes the same
+// LAContext via kSecUseAuthenticationContext. Cache survives until the
+// process dies.
+NSMutableDictionary<NSString*, LAContext*>* laContextCache() {
+  static NSMutableDictionary<NSString*, LAContext*>* cached = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    cached = [[NSMutableDictionary alloc] init];
+  });
+  return cached;
+}
+
+LAContext* contextForRead(NSString* alias, uint32_t windowSec) {
+  if (windowSec == 0) {
+    // No reuse — fresh context every read so iOS prompts every time.
+    LAContext* ctx = [[LAContext alloc] init];
+    ctx.touchIDAuthenticationAllowableReuseDuration = 0;
+    return ctx;
+  }
+  @synchronized (laContextCache()) {
+    LAContext* ctx = laContextCache()[alias];
+    if (ctx == nil) {
+      ctx = [[LAContext alloc] init];
+      laContextCache()[alias] = ctx;
+    }
+    // Keep the duration in sync with the stored window — the caller may
+    // have re-provisioned with a different window since last cached.
+    ctx.touchIDAuthenticationAllowableReuseDuration =
+      (NSTimeInterval)windowSec;
+    return ctx;
+  }
+}
+
+void invalidateContextForAlias(NSString* alias) {
+  @synchronized (laContextCache()) {
+    [laContextCache() removeObjectForKey:alias];
+  }
+}
+
 NSString* serviceName() {
   static NSString* cached = nil;
   static dispatch_once_t once;
@@ -53,7 +95,11 @@ NSDictionary* baseQuery(const std::string& key) {
 }  // namespace
 
 void SecureKVBackend::set(
-  const std::string& key, const uint8_t* data, size_t len, AccessControl ac
+  const std::string& key,
+  const uint8_t* data,
+  size_t len,
+  AccessControl ac,
+  uint32_t validityWindowSec
 ) {
   NSData* value = [NSData dataWithBytes:data length:len];
 
@@ -67,6 +113,10 @@ void SecureKVBackend::set(
   if (delStatus != errSecSuccess && delStatus != errSecItemNotFound) {
     throwOSStatus("secureKV.set (cleanup)", delStatus);
   }
+
+  // Drop any cached LAContext for this alias — the new item may carry a
+  // different window or no biometric flag at all.
+  invalidateContextForAlias(nsString(key));
 
   NSMutableDictionary* add = [baseQuery(key) mutableCopy];
   add[(__bridge id)kSecValueData] = value;
@@ -91,6 +141,17 @@ void SecureKVBackend::set(
         [[nsErr description] UTF8String]);
     }
     add[(__bridge id)kSecAttrAccessControl] = (__bridge_transfer id)acRef;
+
+    // Stash the validity window in kSecAttrGeneric so we can read it
+    // before the prompt and configure LAContext accordingly. 4 bytes BE.
+    uint8_t windowBuf[4] = {
+      static_cast<uint8_t>((validityWindowSec >> 24) & 0xff),
+      static_cast<uint8_t>((validityWindowSec >> 16) & 0xff),
+      static_cast<uint8_t>((validityWindowSec >> 8) & 0xff),
+      static_cast<uint8_t>(validityWindowSec & 0xff),
+    };
+    add[(__bridge id)kSecAttrGeneric] =
+      [NSData dataWithBytes:windowBuf length:4];
   } else {
     add[(__bridge id)kSecAttrAccessible] =
       (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
@@ -105,17 +166,58 @@ void SecureKVBackend::set(
 std::optional<std::vector<uint8_t>> SecureKVBackend::get(
   const std::string& key
 ) {
-  NSMutableDictionary* query = [baseQuery(key) mutableCopy];
-  query[(__bridge id)kSecReturnData] = @YES;
-  query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+  // First pass: fetch attributes only. Attribute reads do NOT trigger
+  // the biometric prompt; only data reads do. This lets us detect a
+  // biometric-protected item and pull the validity window out of
+  // kSecAttrGeneric before deciding whether (and with what LAContext)
+  // to ask for the data.
+  NSMutableDictionary* attrQuery = [baseQuery(key) mutableCopy];
+  attrQuery[(__bridge id)kSecReturnAttributes] = @YES;
+  attrQuery[(__bridge id)kSecReturnData] = @NO;
+  attrQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+  // Suppress any UI on this lookup so we get a clean errSecInteractionNotAllowed
+  // rather than a stray prompt if the item happens to require it.
+  attrQuery[(__bridge id)kSecUseAuthenticationUI] =
+    (__bridge id)kSecUseAuthenticationUISkip;
+
+  CFTypeRef cfAttrs = NULL;
+  OSStatus attrStatus =
+    SecItemCopyMatching((__bridge CFDictionaryRef)attrQuery, &cfAttrs);
+  if (attrStatus == errSecItemNotFound) {
+    return std::nullopt;
+  }
+  if (attrStatus != errSecSuccess) {
+    throwOSStatus("secureKV.get (attrs)", attrStatus);
+  }
+  NSDictionary* attrs = (__bridge_transfer NSDictionary*)cfAttrs;
+  NSData* windowAttr = attrs[(__bridge id)kSecAttrGeneric];
+
+  NSMutableDictionary* dataQuery = [baseQuery(key) mutableCopy];
+  dataQuery[(__bridge id)kSecReturnData] = @YES;
+  dataQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+
+  if (windowAttr != nil && windowAttr.length == 4) {
+    // Biometric item — decode window, attach a (possibly cached)
+    // LAContext so iOS can skip the prompt within the reuse window.
+    const uint8_t* wb = static_cast<const uint8_t*>(windowAttr.bytes);
+    uint32_t windowSec =
+      (static_cast<uint32_t>(wb[0]) << 24) |
+      (static_cast<uint32_t>(wb[1]) << 16) |
+      (static_cast<uint32_t>(wb[2]) << 8) |
+      static_cast<uint32_t>(wb[3]);
+    LAContext* ctx = contextForRead(nsString(key), windowSec);
+    dataQuery[(__bridge id)kSecUseAuthenticationContext] = ctx;
+  }
 
   CFTypeRef cfResult = NULL;
   OSStatus status =
-    SecItemCopyMatching((__bridge CFDictionaryRef)query, &cfResult);
+    SecItemCopyMatching((__bridge CFDictionaryRef)dataQuery, &cfResult);
   if (status == errSecItemNotFound) {
     return std::nullopt;
   }
   if (status != errSecSuccess) {
+    // -128 / errSecUserCanceled — surface verbatim so the JS layer can
+    // detect the cancel via the OSStatus number.
     throwOSStatus("secureKV.get", status);
   }
 
@@ -136,6 +238,7 @@ bool SecureKVBackend::has(const std::string& key) {
 }
 
 void SecureKVBackend::remove(const std::string& key) {
+  invalidateContextForAlias(nsString(key));
   OSStatus status =
     SecItemDelete((__bridge CFDictionaryRef)baseQuery(key));
   if (status != errSecSuccess && status != errSecItemNotFound) {
@@ -171,6 +274,9 @@ std::vector<std::string> SecureKVBackend::list() {
 }
 
 void SecureKVBackend::clear() {
+  @synchronized (laContextCache()) {
+    [laContextCache() removeAllObjects];
+  }
   NSDictionary* query = @{
     (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
     (__bridge id)kSecAttrService : serviceName(),

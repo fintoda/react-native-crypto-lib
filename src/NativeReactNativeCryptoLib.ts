@@ -251,11 +251,13 @@ export interface RawSpec {
    * wrapper upgrades those to SecureKVUnavailableError.
    */
   /** accessControl is "none" | "biometric" — see AccessControl in
-   *  cpp/SecureKVBackend.h. Phase 1 supports biometric on iOS only. */
+   *  cpp/SecureKVBackend.h. validityWindow (seconds) is honoured only
+   *  for the biometric variant; 0 = per-call prompt. */
   secure_kv_set(
     key: string,
     value: ArrayBuffer,
-    accessControl: string
+    accessControl: string,
+    validityWindow: number
   ): Promise<void>;
   secure_kv_get(key: string): Promise<ArrayBuffer | null>;
   secure_kv_has(key: string): Promise<boolean>;
@@ -290,7 +292,8 @@ export interface RawSpec {
   secure_kv_bip32_set_seed(
     key: string,
     seed: ArrayBuffer,
-    accessControl: string
+    accessControl: string,
+    validityWindow: number
   ): Promise<void>;
   secure_kv_bip32_fingerprint(
     key: string,
@@ -337,7 +340,8 @@ export interface RawSpec {
     key: string,
     priv: ArrayBuffer,
     curve: string,
-    accessControl: string
+    accessControl: string,
+    validityWindow: number
   ): Promise<void>;
   secure_kv_raw_get_public(key: string, compact: boolean): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ecdsa(

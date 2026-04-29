@@ -46,6 +46,7 @@ function ascii(s: string): Uint8Array {
 const KEY_BLOB = 'demo.bio.blob';
 const KEY_SEED = 'demo.bio.seed';
 const KEY_RAW = 'demo.bio.raw';
+const KEY_WIN = 'demo.bio.win';
 
 // 32-byte fixed seed so signatures are reproducible across runs without
 // stashing them anywhere. Values shown to the user are derived public
@@ -136,11 +137,51 @@ async function signBiometricRaw(): Promise<string> {
   return `Sig: ${toHex(sig.signature).slice(0, 16)}... verify=${ok}`;
 }
 
+async function setWindowedSeed(): Promise<string> {
+  await secureKV.bip32.setSeed(KEY_WIN, FIXED_SEED, {
+    accessControl: 'biometric',
+    validityWindow: 30,
+  });
+  return `Stored seed at "${KEY_WIN}" with validityWindow=30s`;
+}
+
+async function signWindowedFirst(): Promise<string> {
+  const digest = hash.sha256(ascii('windowed first sign'));
+  const sig = await secureKV.bip32.signEcdsa(
+    KEY_WIN,
+    "m/0'/0",
+    digest,
+    'secp256k1'
+  );
+  const pub = await secureKV.bip32.getPublicKey(KEY_WIN, "m/0'/0", 'secp256k1');
+  const ok = ecdsa.verify(pub, sig.signature, digest);
+  return `Sig: ${toHex(sig.signature).slice(0, 16)}... verify=${ok}`;
+}
+
+async function signWindowedAgain(): Promise<string> {
+  const digest = hash.sha256(ascii('windowed second sign'));
+  const t0 = Date.now();
+  const sig = await secureKV.bip32.signEcdsa(
+    KEY_WIN,
+    "m/0'/0",
+    digest,
+    'secp256k1'
+  );
+  const elapsed = Date.now() - t0;
+  // Within the 30s window, this call must NOT have prompted. Anything
+  // under ~200ms is solid evidence; a real prompt + Face ID match is
+  // typically 500ms+ even with the user pre-touching the sensor.
+  const promptHint =
+    elapsed < 200 ? 'no prompt (window held)' : `prompted (${elapsed}ms)`;
+  return `Sig: ${toHex(sig.signature).slice(0, 16)}... — ${promptHint}`;
+}
+
 async function cleanup(): Promise<string> {
   await secureKV.delete(KEY_BLOB);
   await secureKV.delete(KEY_SEED);
   await secureKV.delete(KEY_RAW);
-  return `Deleted ${KEY_BLOB}, ${KEY_SEED}, ${KEY_RAW}`;
+  await secureKV.delete(KEY_WIN);
+  return `Deleted ${KEY_BLOB}, ${KEY_SEED}, ${KEY_RAW}, ${KEY_WIN}`;
 }
 
 const STEPS: { id: string; label: string; fn: StepFn }[] = [
@@ -184,7 +225,22 @@ const STEPS: { id: string; label: string; fn: StepFn }[] = [
     label: '7. Sign with raw key → expect prompt',
     fn: signBiometricRaw,
   },
-  { id: 'cleanup', label: '8. Delete all biometric items', fn: cleanup },
+  {
+    id: 'set_win',
+    label: '8. Provision windowed seed (validityWindow=30)',
+    fn: setWindowedSeed,
+  },
+  {
+    id: 'sign_win_1',
+    label: '9. Sign with window → expect prompt (first time)',
+    fn: signWindowedFirst,
+  },
+  {
+    id: 'sign_win_2',
+    label: '10. Sign again immediately → expect NO prompt',
+    fn: signWindowedAgain,
+  },
+  { id: 'cleanup', label: '11. Delete all biometric items', fn: cleanup },
 ];
 
 // User-cancel detection. iOS Keychain returns errSecUserCanceled (-128)

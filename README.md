@@ -596,11 +596,31 @@ API < 28 reject `accessControl: 'biometric'` with a clear error.
 > The package eagerly registers a small companion module that hands
 > the current `Activity` to `BiometricPrompt`.
 
-A future release will add session windows
-(`{ accessControl: 'biometric'; validityWindow: N }`) so a single
-prompt can authorise N seconds of subsequent reads — the
-discriminator-union API shape is forward-compatible without breaking
-existing call sites.
+**Session window.** Pair `'biometric'` with `validityWindow: N`
+(seconds) to authorise N seconds of subsequent reads after one prompt.
+Useful for batch operations like signing N inputs of a Bitcoin
+transaction:
+
+```ts
+await secureKV.bip32.setSeed('wallet', seed, {
+  accessControl: 'biometric',
+  validityWindow: 30, // seconds
+});
+
+const sig1 = await secureKV.bip32.signEcdsa(...);  // prompts
+const sig2 = await secureKV.bip32.signEcdsa(...);  // silent (within 30s)
+const sig3 = await secureKV.bip32.signEcdsa(...);  // silent
+// 31s later …
+const sig4 = await secureKV.bip32.signEcdsa(...);  // prompts again
+```
+
+`validityWindow: 0` (the default) keeps per-call prompting. iOS caps
+this internally at 600 seconds (Apple's
+`LATouchIDAuthenticationMaximumAllowableReuseDuration`); on Android,
+the OS enforces the window at the Keystore layer via
+`setUserAuthenticationParameters`. The window is baked into the item
+at provisioning — calling `set` again with a different
+`validityWindow` re-creates the item with the new window.
 
 ### Native-only signing
 
