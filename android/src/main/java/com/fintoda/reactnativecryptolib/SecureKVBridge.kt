@@ -6,7 +6,9 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.nio.channels.FileLock
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -62,6 +64,17 @@ object SecureKVBridge {
   @Volatile private var cachedContext: Context? = null
   private val lock = Any()
 
+  // Single-process guard. The first process to use secureKV acquires an
+  // exclusive FileLock on `<filesDir>/secure_kv/.process.lock`; any other
+  // process trying to use secureKV concurrently fails fast with a clear
+  // misconfiguration error rather than silently racing on master-key
+  // creation and blob writes. The OS releases the lock when the holding
+  // process exits, so a clean restart of the same process re-acquires it.
+  @Volatile private var processLockHandle: FileLock? = null
+  // Held to keep the lock alive for the lifetime of this process. Never
+  // closed — closing the channel would drop the FileLock.
+  @Suppress("unused") @Volatile private var processLockFile: RandomAccessFile? = null
+
   private fun appContext(): Context {
     cachedContext?.let { return it }
     // Resolve the application Context lazily on the first call. The C++
@@ -80,6 +93,57 @@ object SecureKVBridge {
       val ctx = (app as android.app.Application).applicationContext
       cachedContext = ctx
       return ctx
+    }
+  }
+
+  private fun currentProcessName(): String =
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+      android.app.Application.getProcessName() ?: "<unknown>"
+    } else {
+      try {
+        // /proc/self/cmdline is NUL-separated; first segment is the
+        // process name. Strip everything from the first NUL onward.
+        val raw = File("/proc/self/cmdline").readText()
+        val nul = raw.indexOf(0.toChar())
+        (if (nul >= 0) raw.substring(0, nul) else raw).trim()
+      } catch (_: Throwable) {
+        "<unknown>"
+      }
+    }
+
+  /**
+   * Refuses concurrent multi-process access. Called at the top of every
+   * mutating / reading entrypoint so a wrongly-scoped second process
+   * surfaces as `IllegalStateException` (mapped to `CryptoError` on the
+   * JS side) rather than racing on Keystore initialisation.
+   */
+  private fun assertSingleProcess() {
+    if (processLockHandle != null) return
+    synchronized(lock) {
+      if (processLockHandle != null) return
+      val file = File(blobDir(), ".process.lock")
+      val raf = RandomAccessFile(file, "rw")
+      val acquired: FileLock? =
+        try { raf.channel.tryLock() } catch (_: Throwable) { null }
+      if (acquired == null) {
+        try { raf.close() } catch (_: Throwable) { /* ignore */ }
+        throw IllegalStateException(
+          "secureKV: another process already holds the secureKV lock " +
+            "(this process: '${currentProcessName()}'). secureKV is " +
+            "single-process only on Android — restrict access to one " +
+            "process or remove android:process= overrides on the " +
+            "components that use it."
+        )
+      }
+      // Stamp the holding process name for diagnostics. Best-effort.
+      try {
+        raf.setLength(0)
+        raf.write(currentProcessName().toByteArray(Charsets.UTF_8))
+      } catch (_: Throwable) {
+        // ignore — the lock itself is what matters
+      }
+      processLockHandle = acquired
+      processLockFile = raf
     }
   }
 
@@ -154,6 +218,7 @@ object SecureKVBridge {
 
   @JvmStatic
   fun set(key: String, value: ByteArray) {
+    assertSingleProcess()
     synchronized(lock) {
       val masterKey = getOrCreateMasterKey()
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -185,6 +250,7 @@ object SecureKVBridge {
 
   @JvmStatic
   fun get(key: String): ByteArray? {
+    assertSingleProcess()
     val file = blobFile(key)
     if (!file.isFile) return null
     val blob = file.readBytes()
@@ -218,10 +284,14 @@ object SecureKVBridge {
   }
 
   @JvmStatic
-  fun has(key: String): Boolean = blobFile(key).isFile
+  fun has(key: String): Boolean {
+    assertSingleProcess()
+    return blobFile(key).isFile
+  }
 
   @JvmStatic
   fun delete(key: String) {
+    assertSingleProcess()
     synchronized(lock) {
       blobFile(key).delete()
     }
@@ -243,6 +313,7 @@ object SecureKVBridge {
    */
   @JvmStatic
   fun listJoined(): String {
+    assertSingleProcess()
     val dir = blobDir()
     val files = dir.listFiles { _, name -> name.endsWith(".bin") }
       ?: return ""
@@ -280,14 +351,20 @@ object SecureKVBridge {
 
   @JvmStatic
   fun clear() {
+    assertSingleProcess()
     synchronized(lock) {
       val dir = blobDir()
-      dir.listFiles()?.forEach { it.delete() }
+      // Skip the process lock — keeping it preserves the single-process
+      // guarantee for the rest of this process's lifetime.
+      dir.listFiles()?.forEach {
+        if (it.name != ".process.lock") it.delete()
+      }
     }
   }
 
   @JvmStatic
   fun isHardwareBacked(): Boolean {
+    assertSingleProcess()
     return try {
       val masterKey = getOrCreateMasterKey()
       val factory = SecretKeyFactory.getInstance(masterKey.algorithm, ANDROID_KEYSTORE)

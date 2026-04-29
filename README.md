@@ -440,12 +440,21 @@ Hardware-backed key/value storage. Synchronous `Uint8Array` API matching
 the rest of the library — no Promises, no string encoding hop, secrets
 stay as bytes from the Keychain / Keystore boundary up to your hands.
 
-The motivation is to keep private material out of the JS heap as much as
-possible. Generating or importing a key still touches JS once, but storing
-and reading it back through `secureKV` does not stringify, base64, or
-otherwise transit the bridge as text. A future native-only sign API
-(`secureKV.signEcdsa(alias, digest)`) will close the loop so the secret
-never re-enters JS for routine signing.
+The motivation is to keep private material out of the JS heap. Generating
+or importing a key still touches JS once, but storing and reading it back
+through `secureKV` does not stringify, base64, or otherwise transit the
+bridge as text. The `secureKV.bip32.*` and `secureKV.raw.*` sub-APIs close
+the loop further: derived / raw private keys never re-enter JS for
+routine signing — see [Native-only signing](#native-only-signing) below.
+
+> ⚠️ **`secureKV` is device-bound storage, not a backup.** Anything you
+> store here is wiped by app uninstall, factory reset, or some OEM
+> screen-lock changes — and is **not** transferable to a new device.
+> Wallet seeds and recovery phrases must be backed up by the user
+> independently (paper, SLIP-39 shares, etc.) before going into
+> `secureKV`. Treat `SecureKVUnavailableError` as "secrets are gone —
+> re-derive from your recovery source." Full details in the
+> [Durability](#durability) section below.
 
 ```ts
 import {
@@ -481,8 +490,13 @@ import {
 
 `key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
 The store is per-app — two apps using this library on the same device
-have independent namespaces. Single-process only on Android: don't enable
-multi-process for the host app if you rely on `secureKV`.
+have independent namespaces. **Single-process only on Android**: the
+first process to use `secureKV` acquires an exclusive `FileLock` on
+`<filesDir>/secure_kv/.process.lock`; any other process attempting to
+use `secureKV` concurrently fails fast with a clear misconfiguration
+error rather than racing on master-key creation. If your app uses
+`android:process=` overrides, restrict `secureKV` access to one
+process.
 
 ### Native-only signing
 
@@ -741,11 +755,13 @@ The library does **not** refuse to operate on software-keystore devices
 the user to set up a screen lock first), but the library itself treats
 the answer as informational.
 
-### Durability — read this before storing anything you cannot recover
+### Durability
 
-These properties are **intentional** for wallet / seed-class secrets and
-inherent to the underlying OS APIs. Do not store anything here that you
-need to survive these events:
+> **Read this before storing anything you cannot recover.** These
+> properties are **intentional** for wallet / seed-class secrets and
+> inherent to the underlying OS APIs.
+
+Do not store anything here that you need to survive these events:
 
 - **Uninstalling the app** wipes all stored values (file directory and
   Keystore alias / Keychain items are removed by the OS).
