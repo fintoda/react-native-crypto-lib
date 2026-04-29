@@ -529,11 +529,19 @@ object SecureKVBridge {
    * BIOMETRIC_STRONG within that window will succeed without further
    * prompting.
    *
+   * Also reused by [biometricAuthenticate] — same prompt shape, just
+   * with caller-supplied labels and no Keystore key bound to it.
+   *
    * Per-call keys (`validityWindow == 0`) cannot use this form — their
    * auth must be tied to a specific cipher via `CryptoObject`; see
    * [runBiometricPrompt].
    */
-  private fun runBiometricPromptDeviceUnlock(op: String) {
+  private fun runBiometricPromptDeviceUnlock(
+    title: String,
+    subtitle: String,
+    cancelLabel: String,
+    op: String
+  ) {
     val activity = currentFragmentActivity()
     var failureMsg: String? = null
     var failureIsCancel = false
@@ -561,9 +569,9 @@ object SecureKVBridge {
     }
 
     val promptInfo = BiometricPrompt.PromptInfo.Builder()
-      .setTitle("Authenticate")
-      .setSubtitle("Unlock secure storage")
-      .setNegativeButtonText("Cancel")
+      .setTitle(title)
+      .setSubtitle(subtitle)
+      .setNegativeButtonText(cancelLabel)
       .setAllowedAuthenticators(
         androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
       )
@@ -592,6 +600,16 @@ object SecureKVBridge {
       val tag = if (failureIsCancel) "user canceled" else "biometric failed"
       throw SecureKVBiometricException("$op: $tag: $it")
     }
+  }
+
+  // Default labels used by the secureKV biometric paths, where the
+  // prompt copy is intentionally generic — host apps that want
+  // domain-specific copy use [biometricAuthenticate] for UX gates and
+  // wrap secureKV with their own UI on top of it.
+  private fun runBiometricPromptDeviceUnlock(op: String) {
+    runBiometricPromptDeviceUnlock(
+      "Authenticate", "Unlock secure storage", "Cancel", op
+    )
   }
 
   /**
@@ -1089,6 +1107,28 @@ object SecureKVBridge {
    * process at any time, e.g. during app startup before the host has
    * decided whether to even load the secureKV-using screen.
    */
+  /**
+   * UX-only biometric gate. Shows a system biometric prompt and
+   * returns when the user authenticates. Not bound to any
+   * cryptographic operation — this is the entrypoint for
+   * `biometric.authenticate(...)` from JS, distinct from secureKV's
+   * crypto-bound prompts.
+   *
+   * Empty label arguments are replaced with neutral defaults so the
+   * prompt always renders. Skips the secureKV process lock — this
+   * call doesn't touch any secureKV state.
+   */
+  @JvmStatic
+  fun biometricAuthenticate(
+    title: String,
+    subtitle: String,
+    cancelLabel: String
+  ) {
+    val t = if (title.isEmpty()) "Authenticate" else title
+    val c = if (cancelLabel.isEmpty()) "Cancel" else cancelLabel
+    runBiometricPromptDeviceUnlock(t, subtitle, c, "biometric.authenticate")
+  }
+
   @JvmStatic
   fun biometricStatusCode(): Int {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return 5

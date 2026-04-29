@@ -67,7 +67,9 @@ add_library(
     ../cpp/Slip39.cpp
     ../cpp/SecureKV.cpp
     ../cpp/SecureKVSign.cpp
+    ../cpp/Biometric.cpp
     src/main/cpp/SecureKVBackend_android.cpp
+    src/main/cpp/BiometricBackend_android.cpp
     ${TREZOR_CRYPTO_SOURCES}
 )
 

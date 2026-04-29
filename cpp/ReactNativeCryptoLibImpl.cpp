@@ -28,6 +28,7 @@ ReactNativeCryptoLibImpl::ReactNativeCryptoLibImpl(
   cryptolib::registerSlip39Methods(entries);
   cryptolib::registerSecureKVMethods(entries);
   cryptolib::registerSecureKVSignMethods(entries);
+  cryptolib::registerBiometricMethods(entries);
 
   for (const auto& e : entries) {
     methodMap_[e.name] = MethodMetadata{e.argCount, e.fn};

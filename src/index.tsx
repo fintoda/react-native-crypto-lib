@@ -26,6 +26,8 @@ export type {
   AccessControlOptions,
   BiometricStatus,
 } from './secureKV';
+export { biometric } from './biometric';
+export type { BiometricAuthenticateOptions } from './biometric';
 export type {
   RecoverableSignature,
   RecoveryIdType,

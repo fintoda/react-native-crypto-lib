@@ -363,6 +363,28 @@ export interface RawSpec {
     msg: ArrayBuffer
   ): Promise<ArrayBuffer>;
   secure_kv_raw_ecdh(key: string, peerPub: ArrayBuffer): Promise<ArrayBuffer>;
+
+  /**
+   * Standalone biometric prompt — UX gate, **not** a cryptographic
+   * gate. Use `secure_kv_*_sign_*` for high-assurance flows, where
+   * authentication is bound to a Keystore / Keychain operation.
+   *
+   * `biometric_status` is the same underlying check as
+   * `secure_kv_biometric_status`; both share the BiometricStatus
+   * enum string set.
+   *
+   * `biometric_authenticate` shows a system biometric prompt with the
+   * given labels (empty strings are replaced with platform-appropriate
+   * defaults on the native side) and resolves on success. Rejection
+   * messages start with `"user canceled: "` for user-driven dismissals
+   * and `"biometric failed: "` for hard failures.
+   */
+  biometric_status(): Promise<string>;
+  biometric_authenticate(
+    title: string,
+    subtitle: string,
+    cancelLabel: string
+  ): Promise<void>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeCryptoLib');
