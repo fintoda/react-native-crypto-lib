@@ -1,8 +1,10 @@
 // Native-only signing on top of SecureKV slots.
 //
 // Two slot families:
-//   - SEED  (0x01): 64-byte BIP-39 seed. Sign-side methods derive a leaf
-//                   key on the fly (BIP-32 / SLIP-10) and never expose it.
+//   - SEED  (0x01): a 16..64-byte BIP-32 / SLIP-10 seed (the BIP-32 spec
+//                   range; the typical bip39.toSeed output is 64 bytes).
+//                   Sign-side methods derive a leaf key on the fly and
+//                   never expose it.
 //   - RAW   (0x02): a single 32-byte private scalar bound to a curve.
 //                   No derivation; the curve was fixed at provisioning time.
 //
@@ -143,6 +145,18 @@ void requirePayloadLen(
   }
 }
 
+void requireSeedPayloadLen(
+  jsi::Runtime& rt, const char* op, const SlotView& slot
+) {
+  if (slot.payloadLen < kMinSeedPayloadLen ||
+      slot.payloadLen > kMaxSeedPayloadLen) {
+    throw jsi::JSError(
+      rt,
+      std::string(op) + ": seed slot has out-of-range length " +
+        std::to_string(slot.payloadLen));
+  }
+}
+
 // --- Path parsing ----------------------------------------------------------
 
 // Validates the path ArrayBuffer (multiple of 4 bytes, ≤ ~32 levels) and
@@ -233,10 +247,10 @@ jsi::Value invoke_bip32_set_seed(
   auto seed = requireArrayBufferAt(
     rt, "secure_kv_bip32_set_seed", "seed", args, count, 1);
   size_t len = seed.size(rt);
-  if (len != kSeedPayloadLen) {
+  if (len < kMinSeedPayloadLen || len > kMaxSeedPayloadLen) {
     throw jsi::JSError(
       rt,
-      "secure_kv_bip32_set_seed: seed must be 64 bytes (output of bip39.toSeed)");
+      "secure_kv_bip32_set_seed: seed must be 16..64 bytes (BIP-32 spec)");
   }
   auto wrapped = wrapSeedSlot(seed.data(rt), len);
   try {
@@ -269,7 +283,7 @@ jsi::Value invoke_bip32_fingerprint(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));
@@ -301,7 +315,7 @@ jsi::Value invoke_bip32_get_public(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));
@@ -362,7 +376,7 @@ jsi::Value invoke_bip32_sign_ecdsa(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));
@@ -417,7 +431,7 @@ jsi::Value invoke_bip32_sign_schnorr_impl(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));
@@ -481,7 +495,7 @@ jsi::Value invoke_bip32_sign_ed25519(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));
@@ -522,7 +536,7 @@ jsi::Value invoke_bip32_ecdh(
   SlotView slot;
   parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requirePayloadLen(rt, op, slot, kSeedPayloadLen);
+  requireSeedPayloadLen(rt, op, slot);
 
   DerivedKey k;
   std::memset(&k, 0, sizeof(k));

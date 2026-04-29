@@ -11,8 +11,8 @@
 //   [1..] payload (variable, depends on tag)
 //
 // 0x00 — Blob: opaque user bytes via secureKV.set(). Payload = user data.
-// 0x01 — Bip32Seed: 64-byte BIP-39 seed for SLIP-10 derivation. Payload =
-//        64 bytes (matches the output of bip39.toSeed).
+// 0x01 — Bip32Seed: BIP-32 / SLIP-10 seed for derivation. Payload = 16..64
+//        bytes (BIP-32 spec range; bip39.toSeed produces 64).
 // 0x02 — RawPrivate: a single 32-byte private scalar with curve binding.
 //        Payload = [1B curve_tag][32B priv]. curve_tag = 0=secp256k1,
 //        1=nist256p1, 2=ed25519. The curve is fixed at provisioning time
@@ -30,7 +30,12 @@ enum class SlotKind : uint8_t {
   RawPrivate = 0x02,
 };
 
-constexpr size_t kSeedPayloadLen = 64;
+// BIP-32 / SLIP-10 accept seeds of 128 to 512 bits. We mirror that
+// here rather than fixing on bip39.toSeed's 64-byte output so callers
+// can also store smaller seeds (e.g. BIP-32 reference vectors, raw
+// entropy from a hardware wallet, etc.).
+constexpr size_t kMinSeedPayloadLen = 16;
+constexpr size_t kMaxSeedPayloadLen = 64;
 constexpr size_t kRawPayloadLen = 1 /*curve_tag*/ + 32 /*priv*/;
 
 constexpr uint8_t kCurveTagSecp256k1 = 0;

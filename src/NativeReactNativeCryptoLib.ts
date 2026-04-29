@@ -262,10 +262,11 @@ export interface RawSpec {
    * Native-only signing on top of secureKV slots.
    *
    * Two slot families:
-   * - SEED  (set via `secure_kv_bip32_set_seed`): 64-byte BIP-39 seed.
-   *         The bip32_* read methods derive a child key from this seed
-   *         on the fly, sign with it, and zero everything before
-   *         returning. Curve is passed per call.
+   * - SEED  (set via `secure_kv_bip32_set_seed`): a 16..64-byte BIP-32
+   *         seed (BIP-32 spec range; bip39.toSeed gives 64). The bip32_*
+   *         read methods derive a child key from this seed on the fly,
+   *         sign with it, and zero everything before returning. Curve is
+   *         passed per call.
    * - RAW   (set via `secure_kv_raw_set_private`): a single 32-byte
    *         private scalar bound to a curve at provisioning time.
    *         No derivation; the curve travels with the slot so the

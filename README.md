@@ -530,8 +530,10 @@ const sig2 = secureKV.raw.signEcdsa('imported', digest);
 
 #### `secureKV.bip32` — BIP-32 / SLIP-10 derivation on a stored seed
 
-`setSeed(alias, seed)` accepts a 64-byte BIP-39 seed (the output of
-`bip39.toSeed`). Every read method derives a child key on the fly using
+`setSeed(alias, seed)` accepts a BIP-32 seed of 16 to 64 bytes — the
+BIP-32 spec range. Most callers will pass `bip39.toSeed(mnemonic)` (64
+bytes), but raw entropy (e.g. the BIP-32 reference vectors at 16 bytes)
+also works. Every read method derives a child key on the fly using
 trezor-crypto's BIP-32 / SLIP-10 implementation. `path` is either a
 string (`"m/44'/0'/0'/0/0"`) or an array of `number` indices — hardened
 indices have the `0x80000000` bit set.

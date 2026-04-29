@@ -1507,10 +1507,6 @@ function secureKVSignTests(): TestResult[] {
 
   results.push(
     throws('secureKV.get on a SEED slot throws', () => {
-      secureKV.bip32.setSeed(k('seedslot'), bip32Seed);
-      // A 16-byte seed is rejected by the JSI thunk before we even get
-      // to see a slot of any kind. Use the 64-byte BIP-86 seed we
-      // already have.
       secureKV.bip32.setSeed(k('seedslot'), bip86Seed);
       secureKV.get(k('seedslot'));
     })

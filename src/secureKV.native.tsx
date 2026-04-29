@@ -212,7 +212,8 @@ const raw_ecdh = wrapNative(
  * - **Generic blob** (default `set` / `get` / etc.) — opaque user bytes.
  *   Values are `Uint8Array`; keys match `[A-Za-z0-9._-]` (≤128 chars).
  *   Values are capped at 64 KiB.
- * - **`secureKV.bip32`** — provision a 64-byte BIP-39 seed, then
+ * - **`secureKV.bip32`** — provision a 16..64-byte BIP-32 seed (BIP-32
+ *   spec range; `bip39.toSeed` gives 64), then
  *   `signEcdsa` / `signSchnorr[Taproot]` / `signEd25519` / `ecdh` / etc.
  *   derive a child key on the fly and sign without ever returning the
  *   private scalar to JS.
