@@ -44,10 +44,15 @@ const isHardwareBacked = wrapNative((): boolean =>
 /**
  * Hardware-backed key/value store.
  *
- * Values are byte arrays (`Uint8Array`); keys are short string identifiers
- * (`[A-Za-z0-9._-]`, ≤128 chars). Values are capped at 64 KiB. Storage is
- * device-local, never synced to iCloud / Google Drive auto-backup, and is
+ * Values are `Uint8Array`; keys match `[A-Za-z0-9._-]` (≤128 chars).
+ * Values are capped at 64 KiB. Storage is device-local: never iCloud-synced
+ * on iOS, and excluded from Google Drive auto-backup on Android when the
+ * host opts in via the bundled `data_extraction_rules.xml`. Blobs are
  * wiped on uninstall or factory reset — see README "secureKV — durability".
+ *
+ * `get` and `list` throw {@link SecureKVUnavailableError} when the
+ * OS-managed master key has been invalidated; callers should treat
+ * existing secrets as lost and re-derive them.
  *
  * Synchronous; no biometric / authentication prompts in this version
  * (`accessControl` is reserved for future opt-in).

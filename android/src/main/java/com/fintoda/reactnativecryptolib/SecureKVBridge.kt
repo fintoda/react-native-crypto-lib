@@ -3,12 +3,16 @@ package com.fintoda.reactnativecryptolib
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.UnrecoverableKeyException
+import javax.crypto.AEADBadTagException
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -150,29 +154,31 @@ object SecureKVBridge {
 
   @JvmStatic
   fun set(key: String, value: ByteArray) {
-    val masterKey = getOrCreateMasterKey()
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    try {
-      cipher.init(Cipher.ENCRYPT_MODE, masterKey)
-    } catch (e: GeneralSecurityException) {
-      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-    }
-    val iv = cipher.iv
-    val sealed = cipher.doFinal(encodePlain(key, value))
+    synchronized(lock) {
+      val masterKey = getOrCreateMasterKey()
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      try {
+        cipher.init(Cipher.ENCRYPT_MODE, masterKey)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+      val iv = cipher.iv
+      val sealed = cipher.doFinal(encodePlain(key, value))
 
-    val out = ByteArray(iv.size + sealed.size)
-    System.arraycopy(iv, 0, out, 0, iv.size)
-    System.arraycopy(sealed, 0, out, iv.size, sealed.size)
+      val out = ByteArray(iv.size + sealed.size)
+      System.arraycopy(iv, 0, out, 0, iv.size)
+      System.arraycopy(sealed, 0, out, iv.size, sealed.size)
 
-    val file = blobFile(key)
-    val tmp = File(file.parentFile, "${file.name}.tmp")
-    tmp.writeBytes(out)
-    if (!tmp.renameTo(file)) {
-      // Fall back to delete+rename if the platform refused atomic swap
-      file.delete()
+      val file = blobFile(key)
+      val tmp = File(file.parentFile, "${file.name}.tmp")
+      tmp.writeBytes(out)
       if (!tmp.renameTo(file)) {
-        tmp.delete()
-        throw RuntimeException("failed to write secureKV blob")
+        // Fall back to delete+rename if the platform refused atomic swap
+        file.delete()
+        if (!tmp.renameTo(file)) {
+          tmp.delete()
+          throw RuntimeException("failed to write secureKV blob")
+        }
       }
     }
   }
@@ -216,13 +222,24 @@ object SecureKVBridge {
 
   @JvmStatic
   fun delete(key: String) {
-    blobFile(key).delete()
+    synchronized(lock) {
+      blobFile(key).delete()
+    }
   }
 
   /**
    * Returns recovered keys joined by '\n'. The empty store is "" (zero
    * keys). Same delimiter trick used by slip39_combine — keeps the JNI
    * surface to a single jstring rather than a String[].
+   *
+   * Distinguishes two error classes:
+   *   - master-key invalidation (KeyPermanentlyInvalidatedException,
+   *     UnrecoverableKeyException) — propagates as
+   *     SecureKVUnavailableException so the caller learns the entire
+   *     store is gone, matching get()'s behaviour.
+   *   - single-blob auth failures (AEADBadTagException, BadPaddingException)
+   *     — silently skipped as orphans of a prior key generation. The
+   *     enumeration of healthy blobs continues.
    */
   @JvmStatic
   fun listJoined(): String {
@@ -243,21 +260,30 @@ object SecureKVBridge {
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")
       try {
         cipher.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(TAG_BITS, iv))
-        val plain = cipher.doFinal(sealed)
-        if (out.isNotEmpty()) out.append('\n')
-        out.append(decodePlain(plain).first)
-      } catch (_: GeneralSecurityException) {
-        // Skip blobs we can't decrypt — likely orphans from a prior key
-        // generation that got invalidated. Don't surface as fatal.
+      } catch (e: KeyPermanentlyInvalidatedException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      } catch (e: UnrecoverableKeyException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
       }
+      val plain = try {
+        cipher.doFinal(sealed)
+      } catch (_: AEADBadTagException) {
+        continue
+      } catch (_: BadPaddingException) {
+        continue
+      }
+      if (out.isNotEmpty()) out.append('\n')
+      out.append(decodePlain(plain).first)
     }
     return out.toString()
   }
 
   @JvmStatic
   fun clear() {
-    val dir = blobDir()
-    dir.listFiles()?.forEach { it.delete() }
+    synchronized(lock) {
+      val dir = blobDir()
+      dir.listFiles()?.forEach { it.delete() }
+    }
   }
 
   @JvmStatic

@@ -451,18 +451,28 @@ never re-enters JS for routine signing.
 import {
   secureKV,
   SecureKVUnavailableError,
+  type AccessControl,
 } from '@fintoda/react-native-crypto-lib';
 ```
 
 ### API
 
-- `secureKV.set(key, value)` — store `value: Uint8Array` under `key`.
-  Silently overwrites an existing value.
+- `secureKV.set(key, value, accessControl? = 'none')` — store
+  `value: Uint8Array` under `key`. Silently overwrites an existing
+  value. `accessControl` is currently restricted to `'none'`; it's
+  reserved for future biometric / user-presence gating without
+  breaking call sites.
 - `secureKV.get(key)` → `Uint8Array | null`. Returns `null` if the key
-  was never set or has been deleted.
+  was never set or has been deleted. Throws `SecureKVUnavailableError`
+  if the OS-managed master key has been invalidated (factory reset,
+  some screen-lock changes on Android).
 - `secureKV.has(key)` → `boolean`.
 - `secureKV.delete(key)` — idempotent; deleting a missing key is a no-op.
-- `secureKV.list()` → `string[]` of all keys currently stored.
+- `secureKV.list()` → `string[]` of all keys currently stored. Skips
+  individual blobs whose authentication tag fails (orphans of a prior
+  key generation), but throws `SecureKVUnavailableError` if the master
+  key itself is gone — matching `get()`'s behaviour so a wiped store
+  doesn't silently look like an empty one.
 - `secureKV.clear()` — wipe all keys belonging to this app.
 - `secureKV.isHardwareBacked()` → `boolean`. Informational. iOS always
   reports `true` (Keychain is always Secure Enclave-protected with
