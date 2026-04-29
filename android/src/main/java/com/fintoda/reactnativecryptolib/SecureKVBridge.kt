@@ -519,44 +519,194 @@ object SecureKVBridge {
   }
 
   /**
-   * Decrypts a biometric-protected blob, prompting only when the
-   * Keystore-side validity window has expired (or for keys created
-   * with windowSec=0 = per-call). Within the window we just call
-   * doFinal directly — Keystore tracks the window itself, no need
-   * for our own timer.
+   * Shows a `BiometricPrompt` *without* a `CryptoObject`. Used for
+   * windowed keys, where the cipher cannot be initialised before
+   * authentication (Keystore rejects `Cipher.init` itself with
+   * `UserNotAuthenticatedException` if no recent auth exists). After
+   * a successful prompt here, Keystore considers the user authenticated
+   * for the duration of the key's validity window, and any subsequent
+   * `Cipher.init`/`doFinal` on auth-required keys gated by
+   * BIOMETRIC_STRONG within that window will succeed without further
+   * prompting.
+   *
+   * Per-call keys (`validityWindow == 0`) cannot use this form — their
+   * auth must be tied to a specific cipher via `CryptoObject`; see
+   * [runBiometricPrompt].
+   */
+  private fun runBiometricPromptDeviceUnlock(op: String) {
+    val activity = currentFragmentActivity()
+    var failureMsg: String? = null
+    var failureIsCancel = false
+    val latch = CountDownLatch(1)
+
+    val callback = object : BiometricPrompt.AuthenticationCallback() {
+      override fun onAuthenticationSucceeded(
+        result: BiometricPrompt.AuthenticationResult
+      ) {
+        latch.countDown()
+      }
+
+      override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+        failureIsCancel = when (errorCode) {
+          BiometricPrompt.ERROR_USER_CANCELED,
+          BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+          BiometricPrompt.ERROR_CANCELED -> true
+          else -> false
+        }
+        failureMsg = "biometric: $errString (code $errorCode)"
+        latch.countDown()
+      }
+
+      override fun onAuthenticationFailed() { /* prompt stays open */ }
+    }
+
+    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+      .setTitle("Authenticate")
+      .setSubtitle("Unlock secure storage")
+      .setNegativeButtonText("Cancel")
+      .setAllowedAuthenticators(
+        androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+      )
+      .build()
+
+    val mainExecutor: Executor = androidx.core.content.ContextCompat
+      .getMainExecutor(activity)
+
+    activity.runOnUiThread {
+      try {
+        val prompt = BiometricPrompt(activity, mainExecutor, callback)
+        prompt.authenticate(promptInfo)
+      } catch (t: Throwable) {
+        failureMsg = "biometric: failed to show prompt: ${t.message}"
+        latch.countDown()
+      }
+    }
+
+    val ok = latch.await(BIOMETRIC_TIMEOUT_SEC, TimeUnit.SECONDS)
+    if (!ok) {
+      throw SecureKVBiometricException(
+        "$op: biometric prompt timed out after ${BIOMETRIC_TIMEOUT_SEC}s"
+      )
+    }
+    failureMsg?.let {
+      val tag = if (failureIsCancel) "user canceled" else "biometric failed"
+      throw SecureKVBiometricException("$op: $tag: $it")
+    }
+  }
+
+  /**
+   * Walks the exception cause chain looking for a "needs biometric
+   * re-auth" signal. Android wraps this differently across versions:
+   * sometimes as `UserNotAuthenticatedException` directly (init path,
+   * or some OEMs from doFinal), but more commonly during `doFinal` as
+   * an `IllegalBlockSizeException` whose cause is
+   * `android.security.KeyStoreException("Key user not authenticated")`
+   * — that wrapper is **not** a subclass of `GeneralSecurityException`,
+   * so a naive catch sees an opaque "GeneralSecurityException: Key
+   * user not authenticated" and treats the master key as invalidated.
+   *
+   * The message wording isn't perfectly stable across versions, so
+   * match `not authenticated` substring (case-insensitive) — this
+   * covers AOSP's "Key user not authenticated", the JCA-side
+   * "User not authenticated", and any minor rewordings.
+   */
+  private fun isUserNotAuthenticated(t: Throwable?): Boolean {
+    var cur: Throwable? = t
+    val seen = HashSet<Throwable>()
+    while (cur != null && seen.add(cur)) {
+      if (cur is UserNotAuthenticatedException) return true
+      val msg = cur.message ?: ""
+      if (msg.contains("not authenticated", ignoreCase = true)) return true
+      cur = cur.cause
+    }
+    return false
+  }
+
+  /**
+   * Decrypts a biometric-protected blob.
+   *
+   * Two distinct prompt patterns, picked by the per-key validity
+   * window — both shapes are required by AndroidKeystore:
+   *
+   * - **window = 0 (per-call)** — Keystore allows `Cipher.init` to
+   *   succeed without auth, but `doFinal` requires a `CryptoObject`-
+   *   bound BiometricPrompt that authorises *that exact cipher* for
+   *   one operation. Use [runBiometricPrompt].
+   * - **window > 0 (session)** — Keystore checks recent auth at
+   *   `Cipher.init` time. If the window has expired we cannot
+   *   produce an initialised cipher to wrap in a `CryptoObject`, so
+   *   we use [runBiometricPromptDeviceUnlock] (no `CryptoObject`).
+   *   That auth then satisfies any auth-required, BIOMETRIC_STRONG
+   *   key for its full validity window — at which point a *fresh*
+   *   `Cipher.init` + `doFinal` succeeds without further prompting.
    */
   private fun decryptBiometric(
-    masterKey: SecretKey, iv: ByteArray, sealed: ByteArray
+    masterKey: SecretKey,
+    iv: ByteArray,
+    sealed: ByteArray,
+    validityWindowSec: Int
   ): ByteArray {
-    fun fresh(): Cipher {
+    fun freshInit(): Cipher {
       val c = Cipher.getInstance("AES/GCM/NoPadding")
-      try {
-        c.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(TAG_BITS, iv))
-      } catch (e: KeyPermanentlyInvalidatedException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-      } catch (e: GeneralSecurityException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-      }
+      c.init(Cipher.DECRYPT_MODE, masterKey, GCMParameterSpec(TAG_BITS, iv))
       return c
     }
 
-    val firstAttempt = fresh()
-    return try {
-      firstAttempt.doFinal(sealed)
-    } catch (_: UserNotAuthenticatedException) {
-      // Window expired or per-call key. Re-create cipher (the failed
-      // doFinal may have left state) and authenticate under the prompt.
-      val cipher = fresh()
+    fun mapInitFailure(e: GeneralSecurityException): Nothing {
+      if (e is KeyPermanentlyInvalidatedException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    }
+
+    if (validityWindowSec <= 0) {
+      // Per-call. init() succeeds; CryptoObject prompt authorises
+      // exactly one doFinal on the supplied cipher.
+      val cipher = try {
+        freshInit()
+      } catch (e: GeneralSecurityException) {
+        mapInitFailure(e)
+      }
       val authed = runBiometricPrompt(cipher, "secureKV.get")
-      try {
+      return try {
         authed.doFinal(sealed)
       } catch (e: GeneralSecurityException) {
         throw SecureKVUnavailableException("unavailable: ${e.message}", e)
       }
+    }
+
+    // Windowed (window > 0). Try the fast-path first; on auth failure
+    // anywhere (init or doFinal), prompt without CryptoObject to
+    // re-arm the validity window, then retry with a fresh cipher.
+    fun retryAfterPromptUnlock(): ByteArray {
+      runBiometricPromptDeviceUnlock("secureKV.get")
+      val c = try {
+        freshInit()
+      } catch (e: GeneralSecurityException) {
+        mapInitFailure(e)
+      }
+      return try {
+        c.doFinal(sealed)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+    }
+
+    val firstAttempt = try {
+      freshInit()
     } catch (e: KeyPermanentlyInvalidatedException) {
       throw SecureKVUnavailableException("unavailable: ${e.message}", e)
     } catch (e: GeneralSecurityException) {
+      if (isUserNotAuthenticated(e)) return retryAfterPromptUnlock()
       throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    }
+    return try {
+      firstAttempt.doFinal(sealed)
+    } catch (e: KeyPermanentlyInvalidatedException) {
+      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    } catch (e: GeneralSecurityException) {
+      if (isUserNotAuthenticated(e)) retryAfterPromptUnlock()
+      else throw SecureKVUnavailableException("unavailable: ${e.message}", e)
     }
   }
 
@@ -664,31 +814,95 @@ object SecureKVBridge {
     }
     synchronized(lock) {
       val masterKey = getOrCreateMasterKey(accessControl, window)
-      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-      try {
-        cipher.init(Cipher.ENCRYPT_MODE, masterKey)
-      } catch (e: KeyPermanentlyInvalidatedException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-      } catch (e: GeneralSecurityException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      val plain = encodePlain(key, value)
+
+      fun freshInit(): Cipher {
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.ENCRYPT_MODE, masterKey)
+        return c
       }
 
-      // Biometric path: cipher.doFinal will throw UserNotAuthenticated;
-      // BiometricPrompt(CryptoObject(cipher)) authorises this one call.
-      val ready = if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
-        runBiometricPrompt(cipher, "secureKV.set")
-      } else {
-        cipher
-      }
+      // Pair of (iv, sealed). Path differs per access-control variant:
+      //
+      // - none: plain init + doFinal.
+      // - biometric, window=0 (per-call): init + CryptoObject prompt
+      //   authorises one doFinal on that cipher.
+      // - biometric, window>0 (session): init may itself throw
+      //   UserNotAuthenticatedException — Keystore checks recent auth
+      //   *at init time* for windowed keys. We can't wrap a non-init'd
+      //   cipher in a CryptoObject, so we run a CryptoObject-less
+      //   prompt to satisfy the window, then re-init + doFinal.
+      val (iv, sealed) = when {
+        accessControl == ACCESS_CONTROL_NONE -> {
+          val c = try {
+            freshInit()
+          } catch (e: KeyPermanentlyInvalidatedException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          } catch (e: GeneralSecurityException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          }
+          Pair(c.iv, c.doFinal(plain))
+        }
+        window == 0 -> {
+          val c = try {
+            freshInit()
+          } catch (e: KeyPermanentlyInvalidatedException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          } catch (e: GeneralSecurityException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          }
+          val authed = runBiometricPrompt(c, "secureKV.set")
+          val out = try {
+            authed.doFinal(plain)
+          } catch (e: UserNotAuthenticatedException) {
+            throw SecureKVBiometricException(
+              "secureKV.set: encrypt rejected after auth: ${e.message}"
+            )
+          }
+          Pair(authed.iv, out)
+        }
+        else -> {
+          fun retryAfterPromptUnlock(): Pair<ByteArray, ByteArray> {
+            runBiometricPromptDeviceUnlock("secureKV.set")
+            val c = try {
+              freshInit()
+            } catch (e: GeneralSecurityException) {
+              throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+            }
+            val out = try {
+              c.doFinal(plain)
+            } catch (e: GeneralSecurityException) {
+              throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+            }
+            return Pair(c.iv, out)
+          }
 
-      val iv = ready.iv
-      val sealed = try {
-        ready.doFinal(encodePlain(key, value))
-      } catch (e: UserNotAuthenticatedException) {
-        // Should be impossible after a successful prompt, but guard anyway.
-        throw SecureKVBiometricException(
-          "secureKV.set: encrypt rejected after auth: ${e.message}"
-        )
+          val firstAttempt = try {
+            freshInit()
+          } catch (e: KeyPermanentlyInvalidatedException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          } catch (e: GeneralSecurityException) {
+            if (isUserNotAuthenticated(e)) {
+              null
+            } else {
+              throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+            }
+          }
+          if (firstAttempt == null) {
+            retryAfterPromptUnlock()
+          } else {
+            try {
+              Pair(firstAttempt.iv, firstAttempt.doFinal(plain))
+            } catch (e: KeyPermanentlyInvalidatedException) {
+              throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+            } catch (e: GeneralSecurityException) {
+              if (isUserNotAuthenticated(e)) retryAfterPromptUnlock()
+              else throw SecureKVUnavailableException(
+                "unavailable: ${e.message}", e
+              )
+            }
+          }
+        }
       }
 
       val headerLen =
@@ -731,7 +945,9 @@ object SecureKVBridge {
     )
 
     val plain = if (parsed.variant == ACCESS_CONTROL_BIOMETRIC) {
-      decryptBiometric(masterKey, parsed.iv, parsed.sealed)
+      decryptBiometric(
+        masterKey, parsed.iv, parsed.sealed, parsed.validityWindowSec
+      )
     } else {
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")
       try {
