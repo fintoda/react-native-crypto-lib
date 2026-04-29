@@ -65,6 +65,8 @@ add_library(
     ../cpp/Bip39.cpp
     ../cpp/Bip32.cpp
     ../cpp/Slip39.cpp
+    ../cpp/SecureKV.cpp
+    src/main/cpp/SecureKVBackend_android.cpp
     ${TREZOR_CRYPTO_SOURCES}
 )
 
@@ -100,5 +102,6 @@ target_compile_options(
 target_link_libraries(
     fintoda-react-native-crypto-lib    jsi
     reactnative
+    fbjni
     react_codegen_ReactNativeCryptoLibSpec
 )

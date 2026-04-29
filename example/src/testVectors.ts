@@ -12,6 +12,7 @@ import {
   mac,
   rng,
   schnorr,
+  secureKV,
   slip39,
   x25519,
   ecc,
@@ -1065,6 +1066,151 @@ function slip39Tests(): TestResult[] {
   ];
 }
 
+// =========================================================================
+// secureKV — hardware-backed key/value store. Tests run against the real
+// Keychain (iOS) / AndroidKeystore (Android), so a per-suite clear() is
+// required to isolate from previous runs and to leave the device clean.
+// =========================================================================
+
+function secureKVTests(): TestResult[] {
+  // Snapshot any keys the host left around, then wipe so each suite run
+  // starts clean. We restore nothing — this is a debug app.
+  try {
+    secureKV.clear();
+  } catch {
+    // ignore: if clear fails, the individual asserts will report it
+  }
+
+  const results: TestResult[] = [];
+  const k = (s: string) => `tv.${s}`; // namespace test keys
+
+  results.push(
+    check('secureKV round-trip 32 bytes', () => {
+      const value = fromHex(
+        'a1b2c3d4e5f60718' +
+          '293a4b5c6d7e8f90' +
+          '1122334455667788' +
+          '99aabbccddeeff00'
+      );
+      secureKV.set(k('seed'), value);
+      const got = secureKV.get(k('seed'));
+      if (got === null) return 'returned null';
+      return eq(got, value) || `got ${toHex(got)}`;
+    })
+  );
+
+  results.push(
+    check('secureKV get unknown key returns null', () => {
+      return secureKV.get(k('does-not-exist')) === null;
+    })
+  );
+
+  results.push(
+    check('secureKV has true after set, false after delete', () => {
+      secureKV.set(k('flag'), ascii('1'));
+      if (!secureKV.has(k('flag'))) return 'has=false right after set';
+      secureKV.delete(k('flag'));
+      return !secureKV.has(k('flag'));
+    })
+  );
+
+  results.push(
+    check('secureKV overwrite returns the second value', () => {
+      secureKV.set(k('over'), ascii('first'));
+      secureKV.set(k('over'), ascii('second'));
+      const got = secureKV.get(k('over'));
+      if (got === null) return 'null after overwrite';
+      return eq(got, ascii('second')) || `got ${toHex(got)}`;
+    })
+  );
+
+  results.push(
+    check('secureKV delete is idempotent on unknown key', () => {
+      secureKV.delete(k('never-existed'));
+      return true;
+    })
+  );
+
+  results.push(
+    check('secureKV empty value round-trips', () => {
+      secureKV.set(k('empty'), new Uint8Array(0));
+      const got = secureKV.get(k('empty'));
+      if (got === null) return 'null after empty set';
+      return got.length === 0 || `length=${got.length}`;
+    })
+  );
+
+  results.push(
+    check('secureKV value at 64 KiB limit succeeds', () => {
+      const big = new Uint8Array(65536);
+      for (let i = 0; i < big.length; i++) big[i] = i & 0xff;
+      secureKV.set(k('big'), big);
+      const got = secureKV.get(k('big'));
+      if (got === null) return 'null after big set';
+      return eq(got, big) || 'mismatch';
+    })
+  );
+
+  results.push(
+    throws('secureKV value over 64 KiB throws', () => {
+      secureKV.set(k('toobig'), new Uint8Array(65537));
+    })
+  );
+
+  results.push(
+    throws('secureKV empty key throws', () => {
+      secureKV.set('', ascii('x'));
+    })
+  );
+
+  results.push(
+    throws('secureKV key with invalid char throws', () => {
+      secureKV.set('bad/key', ascii('x'));
+    })
+  );
+
+  results.push(
+    throws('secureKV key over 128 chars throws', () => {
+      secureKV.set('a'.repeat(129), ascii('x'));
+    })
+  );
+
+  results.push(
+    check('secureKV list and clear', () => {
+      secureKV.clear();
+      secureKV.set(k('a'), ascii('1'));
+      secureKV.set(k('b'), ascii('2'));
+      secureKV.set(k('c'), ascii('3'));
+      const all = secureKV.list().sort();
+      const expected = [k('a'), k('b'), k('c')].sort();
+      const listed =
+        all.length === 3 &&
+        all[0] === expected[0] &&
+        all[1] === expected[1] &&
+        all[2] === expected[2];
+      if (!listed) return `list=${JSON.stringify(all)}`;
+      secureKV.clear();
+      return secureKV.list().length === 0 || 'non-empty after clear';
+    })
+  );
+
+  results.push(
+    check('secureKV isHardwareBacked returns boolean', () => {
+      const v = secureKV.isHardwareBacked();
+      return typeof v === 'boolean';
+    })
+  );
+
+  // Final cleanup so the next launch starts blank.
+  try {
+    secureKV.clear();
+  } catch {
+    // ignore
+  }
+
+  return results;
+}
+
 export function runAllTests(): TestResult[] {
   return [
     ...hashTests(),
@@ -1079,5 +1225,6 @@ export function runAllTests(): TestResult[] {
     ...eccTests(),
     ...webcryptoTests(),
     ...slip39Tests(),
+    ...secureKVTests(),
   ];
 }

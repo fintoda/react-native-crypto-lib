@@ -1,4 +1,4 @@
-export { CryptoError } from './errors';
+export { CryptoError, SecureKVUnavailableError } from './errors';
 export { hash } from './hash';
 export { kdf } from './kdf';
 export { mac } from './mac';
@@ -20,6 +20,8 @@ export { getRandomValues, installCryptoPolyfill } from './webcrypto';
 export { ecc } from './ecc';
 export type { XOnlyTweakResult } from './ecc';
 export { tinySecp256k1 } from './tiny-secp256k1';
+export { secureKV } from './secureKV';
+export type { AccessControl } from './secureKV';
 export type {
   RecoverableSignature,
   RecoveryIdType,

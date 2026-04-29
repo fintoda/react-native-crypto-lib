@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reference rules for excluding the secureKV blob directory from Auto
+  Backup on Android 11 and below (API ≤ 30). Host opts in with:
+
+      android:fullBackupContent="@xml/secure_kv_full_backup_content"
+-->
+<full-backup-content>
+  <exclude domain="file" path="secure_kv/" />
+</full-backup-content>

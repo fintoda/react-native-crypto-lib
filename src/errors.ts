@@ -20,6 +20,20 @@ export class CryptoError extends Error {
 }
 
 /**
+ * Thrown by `secureKV.*` when the OS-managed master key for our store has
+ * become unusable — typically after a factory reset, screen-lock removal
+ * on older Android, or device-to-device migration. Existing blobs cannot
+ * be decrypted; the application should treat them as lost and re-derive
+ * its secrets.
+ */
+export class SecureKVUnavailableError extends CryptoError {
+  constructor(fn: string, reason: string) {
+    super(fn, reason);
+    this.name = 'SecureKVUnavailableError';
+  }
+}
+
+/**
  * Wraps a function so that native JSI errors (thrown as strings matching
  * `"function: reason"`) are re-thrown as `CryptoError` instances.
  */
@@ -34,7 +48,15 @@ export function wrapNative<A extends unknown[], R>(
         e instanceof Error ? e.message : typeof e === 'string' ? e : '';
       const idx = msg.indexOf(': ');
       if (idx > 0) {
-        throw new CryptoError(msg.slice(0, idx), msg.slice(idx + 2));
+        const nativeFn = msg.slice(0, idx);
+        const reason = msg.slice(idx + 2);
+        if (
+          nativeFn.startsWith('secure_kv_') &&
+          reason.startsWith('unavailable')
+        ) {
+          throw new SecureKVUnavailableError(nativeFn, reason);
+        }
+        throw new CryptoError(nativeFn, reason);
       }
       throw e;
     }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reference rules for excluding the secureKV blob directory from
+  Auto Backup and device-to-device transfer (Android 12+, API 31+).
+
+  This file is shipped as a resource so host applications can opt in
+  with one line in their manifest:
+
+      android:dataExtractionRules="@xml/secure_kv_data_extraction_rules"
+
+  Defining this in the library manifest itself would silently override
+  any backup rules the host app already has — we deliberately leave the
+  decision to the host. See README "secureKV — durability".
+-->
+<data-extraction-rules>
+  <cloud-backup>
+    <exclude domain="file" path="secure_kv/" />
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="file" path="secure_kv/" />
+  </device-transfer>
+</data-extraction-rules>

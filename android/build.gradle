@@ -1,0 +1,68 @@
+// Android library module for @fintoda/react-native-crypto-lib.
+//
+// The C++ Turbo Module itself is wired via react-native.config.js
+// (cxxModuleCMakeListsPath) and compiled into the host app's native lib.
+// This Gradle module adds a Kotlin companion AAR that hosts JNI-callable
+// helpers — currently SecureKVBridge for AndroidKeystore access, since
+// Keystore is a Framework API with no NDK surface.
+
+buildscript {
+  ext.safeExtGet = { prop, fallback ->
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+  }
+
+  repositories {
+    google()
+    mavenCentral()
+  }
+
+  dependencies {
+    classpath "com.android.tools.build:gradle:8.7.2"
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${safeExtGet('kotlinVersion', '2.1.20')}"
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+android {
+  namespace "com.fintoda.reactnativecryptolib"
+  compileSdk safeExtGet('compileSdkVersion', 36)
+
+  defaultConfig {
+    minSdk safeExtGet('minSdkVersion', 24)
+    targetSdk safeExtGet('targetSdkVersion', 36)
+  }
+
+  buildFeatures {
+    buildConfig false
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+
+  sourceSets {
+    main {
+      java.srcDirs = ["src/main/java"]
+    }
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+}

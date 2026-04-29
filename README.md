@@ -91,6 +91,7 @@ underlying buffer; otherwise the wrapper makes one defensive slice.
 - [bip39](#bip39) — mnemonics
 - [bip32](#bip32) — HD derivation (SLIP-10)
 - [slip39](#slip39) — Shamir secret sharing
+- [secureKV](#securekv) — hardware-backed key/value storage
 - [webcrypto](#webcrypto) — getRandomValues polyfill
 - [Compatibility notes](#compatibility-notes)
 
@@ -432,6 +433,105 @@ const recovered = slip39.combine(
   Recover the master secret from enough shares (single or multi-group).
 - `slip39.validateMnemonic(mnemonic)` → `boolean`.
   Wordlist + RS1024 checksum validation.
+
+## secureKV
+
+Hardware-backed key/value storage. Synchronous `Uint8Array` API matching
+the rest of the library — no Promises, no string encoding hop, secrets
+stay as bytes from the Keychain / Keystore boundary up to your hands.
+
+The motivation is to keep private material out of the JS heap as much as
+possible. Generating or importing a key still touches JS once, but storing
+and reading it back through `secureKV` does not stringify, base64, or
+otherwise transit the bridge as text. A future native-only sign API
+(`secureKV.signEcdsa(alias, digest)`) will close the loop so the secret
+never re-enters JS for routine signing.
+
+```ts
+import {
+  secureKV,
+  SecureKVUnavailableError,
+} from '@fintoda/react-native-crypto-lib';
+```
+
+### API
+
+- `secureKV.set(key, value)` — store `value: Uint8Array` under `key`.
+  Silently overwrites an existing value.
+- `secureKV.get(key)` → `Uint8Array | null`. Returns `null` if the key
+  was never set or has been deleted.
+- `secureKV.has(key)` → `boolean`.
+- `secureKV.delete(key)` — idempotent; deleting a missing key is a no-op.
+- `secureKV.list()` → `string[]` of all keys currently stored.
+- `secureKV.clear()` — wipe all keys belonging to this app.
+- `secureKV.isHardwareBacked()` → `boolean`. Informational. iOS always
+  reports `true` (Keychain is always Secure Enclave-protected with
+  `*ThisDeviceOnly` accessibility); Android reports whether the master
+  key landed in TEE / StrongBox vs. software keystore.
+
+`key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
+
+### What it stores, where, and how
+
+| platform | mechanism |
+|---|---|
+| iOS | `kSecClassGenericPassword` Keychain items, `service = "<bundleId>.cryptolib.kv"`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. |
+| Android | AES-256-GCM master key in AndroidKeystore (alias `cryptolib.kv.master.<applicationId>`). Each value is sealed individually and written to `<filesDir>/secure_kv/<sha256(key)>.bin`. |
+
+The store is per-app — two apps using this library on the same device
+have independent namespaces.
+
+### Durability — read this before storing anything you cannot recover
+
+These properties are **intentional** for wallet / seed-class secrets and
+inherent to the underlying OS APIs. Do not store anything here that you
+need to survive these events:
+
+- **Uninstalling the app** wipes all stored values (file directory and
+  Keystore alias / Keychain items are removed by the OS).
+- **Factory reset** invalidates the master key. Old blobs become
+  permanently undecryptable.
+- **Restoring to a new device** does not migrate the store. Both
+  platforms scope our items to the original device's hardware.
+- **Removing or replacing the device passcode / screen lock** can
+  invalidate the AndroidKeystore master key on some OEM ROMs,
+  surfacing as `SecureKVUnavailableError` on the next `get()`.
+
+When a backend reports the master key is no longer usable,
+`secureKV.get()` (and `list()`) throws `SecureKVUnavailableError`
+(`extends CryptoError`). Callers should catch this and re-derive their
+secrets from a recovery source rather than retry blindly.
+
+### Excluding from Auto Backup (Android)
+
+Android's Auto Backup will, by default, copy app files to Google Drive
+in a way that breaks our model: blobs go to the cloud but the master
+key cannot leave the device, so restored data is unreadable. To prevent
+the silent leak, opt the host app's manifest into the bundled rules:
+
+```xml
+<!-- android/app/src/main/AndroidManifest.xml -->
+<application
+  ...
+  android:dataExtractionRules="@xml/secure_kv_data_extraction_rules"
+  android:fullBackupContent="@xml/secure_kv_full_backup_content">
+  ...
+</application>
+```
+
+The XML resources are shipped by the library; you only need to point at
+them. The library does **not** apply these settings via manifest merge,
+to avoid stomping on backup rules the host app may already have.
+
+### What it does not protect against
+
+- **A rooted / jailbroken device with active malware.** The OS will
+  happily decrypt for any process running as your app's UID. Hardware
+  protection prevents extraction of the master key, not its use.
+- **A future biometric / user-presence requirement.** Not in this
+  version — `set` / `get` proceed without prompting. The
+  `accessControl` parameter in the API is reserved for adding
+  biometric-gated reads later without breaking callers.
 
 ## webcrypto
 

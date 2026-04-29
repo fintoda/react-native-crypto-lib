@@ -69,6 +69,10 @@ Pod::Spec.new do |s|
                     "vendor/trezor-crypto/crypto/ed25519-donna/*.h",
                     "vendor/trezor-crypto/crypto/aes/*.h"] + trezor_crypto_sources
 
+  # Security: kSecClassGenericPassword wrappers for the secureKV module
+  # live in ios/SecureKVBackend.mm.
+  s.frameworks = "Security"
+
   s.pod_target_xcconfig = {
     "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/ios/generated/ReactCodegen\" \"$(PODS_TARGET_SRCROOT)/ios/generated/ReactCodegen/ReactNativeCryptoLibSpec\" \"$(PODS_TARGET_SRCROOT)/cpp\" \"$(PODS_TARGET_SRCROOT)/vendor/trezor-crypto/crypto\" \"$(PODS_TARGET_SRCROOT)/vendor/trezor-crypto/crypto/ed25519-donna\" \"$(PODS_TARGET_SRCROOT)/vendor/trezor-crypto/crypto/aes\"",
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",

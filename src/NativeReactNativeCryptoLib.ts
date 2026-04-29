@@ -234,6 +234,29 @@ export interface RawSpec {
   /** Recover master secret from '\n'-joined mnemonics. */
   slip39_combine(mnemonics: string, passphrase: string): ArrayBuffer;
   slip39_validate_mnemonic(mnemonic: string): boolean;
+
+  /**
+   * Hardware-backed key/value storage.
+   *
+   * iOS: Keychain (kSecClassGenericPassword,
+   *      kSecAttrAccessibleWhenUnlockedThisDeviceOnly), service scoped to
+   *      the host app's bundle id.
+   * Android: AES-256-GCM master key in AndroidKeystore wraps blobs in
+   *      <filesDir>/secure_kv/<sha256(name)>.bin.
+   *
+   * Key names are restricted to [A-Za-z0-9._-] (≤128 chars) and value
+   * payloads to 64 KiB. `secure_kv_get` returns null when the key is
+   * absent; backend failures (e.g. master key invalidated after factory
+   * reset) surface as CryptoError with reason "unavailable" — the JS
+   * wrapper upgrades those to SecureKVUnavailableError.
+   */
+  secure_kv_set(key: string, value: ArrayBuffer): void;
+  secure_kv_get(key: string): ArrayBuffer | null;
+  secure_kv_has(key: string): boolean;
+  secure_kv_delete(key: string): void;
+  secure_kv_list(): string[];
+  secure_kv_clear(): void;
+  secure_kv_is_hardware_backed(): boolean;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeCryptoLib');
