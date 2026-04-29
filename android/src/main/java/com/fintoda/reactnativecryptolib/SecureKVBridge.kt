@@ -1,5 +1,6 @@
 package com.fintoda.reactnativecryptolib
 
+import android.app.Activity
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -155,14 +156,17 @@ object SecureKVBridge {
   }
 
   private fun currentFragmentActivity(): FragmentActivity {
-    val rc = reactContext ?: throw SecureKVBiometricException(
-      "biometric: ReactApplicationContext not bound — host app must " +
-        "include ReactNativeCryptoLibPackage in its package list"
-    )
-    val activity = rc.currentActivity ?: throw SecureKVBiometricException(
-      "biometric: no foreground Activity — biometric prompts can only be " +
-        "shown while the app is in the foreground"
-    )
+    // Prefer the bound RAC if we have it (faster, no reflection). Falls
+    // through to ActivityThread reflection if SecureKVActivityHolder
+    // hasn't been constructed yet — RN's New Architecture doesn't always
+    // honour `needsEagerInit` for legacy NativeModules, so we cannot
+    // rely on the RAC-binding path.
+    val activity: Activity = reactContext?.currentActivity
+      ?: currentActivityFromActivityThread()
+      ?: throw SecureKVBiometricException(
+        "biometric: no foreground Activity — biometric prompts can only " +
+          "be shown while the app is in the foreground"
+      )
     if (activity !is FragmentActivity) {
       throw SecureKVBiometricException(
         "biometric: current Activity is not a FragmentActivity " +
@@ -171,6 +175,40 @@ object SecureKVBridge {
       )
     }
     return activity
+  }
+
+  /**
+   * Walks `ActivityThread.mActivities` to find the resumed (non-paused)
+   * Activity. Used as a fallback when [reactContext] hasn't been bound
+   * — same technique as Sentry, Apollo, ChuckerInterceptor and friends.
+   * Returns null on any reflection failure; the caller then surfaces a
+   * "no foreground Activity" error.
+   */
+  private fun currentActivityFromActivityThread(): Activity? {
+    return try {
+      val atClass = Class.forName("android.app.ActivityThread")
+      val at = atClass.getMethod("currentActivityThread").invoke(null)
+        ?: return null
+      val activitiesField = atClass.getDeclaredField("mActivities")
+        .apply { isAccessible = true }
+      val activities = activitiesField.get(at) as? Map<*, *> ?: return null
+      for (v in activities.values) {
+        val recordClass = v?.javaClass ?: continue
+        val pausedField = try {
+          recordClass.getDeclaredField("paused").apply { isAccessible = true }
+        } catch (_: NoSuchFieldException) {
+          continue
+        }
+        if (!pausedField.getBoolean(v)) {
+          val activityField = recordClass.getDeclaredField("activity")
+            .apply { isAccessible = true }
+          return activityField.get(v) as? Activity
+        }
+      }
+      null
+    } catch (_: Throwable) {
+      null
+    }
   }
 
   private fun currentProcessName(): String =
