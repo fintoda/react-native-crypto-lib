@@ -65,4 +65,8 @@ repositories {
 
 dependencies {
   implementation "com.facebook.react:react-android"
+  // BiometricPrompt — required for accessControl='biometric'. Added at
+  // 1.1.0 because that's the last stable release; 1.2.0-alpha exists but
+  // introduces breaking API changes we don't need.
+  implementation "androidx.biometric:biometric:1.1.0"
 }

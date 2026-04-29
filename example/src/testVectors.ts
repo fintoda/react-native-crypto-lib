@@ -1,8 +1,6 @@
 // Runtime test suite: verifies native crypto output against known test vectors.
 // Each test returns { name, pass, detail? }. The App renders results.
 
-import { Platform } from 'react-native';
-
 import {
   aes,
   bip32,
@@ -1253,24 +1251,11 @@ async function secureKVTests(): Promise<TestResult[]> {
     )
   );
 
-  // Phase 1: biometric is iOS-only. Android refuses; iOS provisions the
-  // item without invoking the prompt (read would, but we'd need user
-  // interaction to run that). We skip the iOS positive path here and
-  // verify only the Android refusal — biometric reads need a live device
-  // with enrolled biometrics, which is out of scope for the automated
-  // suite.
-  if (Platform.OS === 'android') {
-    results.push(
-      await throwsAsync(
-        'secureKV.set accessControl="biometric" rejected on Android',
-        async () => {
-          await secureKV.set(k('biom'), ascii('x'), {
-            accessControl: 'biometric',
-          });
-        }
-      )
-    );
-  }
+  // Phase 2 supports biometric on both iOS and Android (Android with
+  // BiometricPrompt). Both platforms require a live biometric prompt
+  // for any read on a biometric-protected blob, and Android additionally
+  // prompts on set (the iOS Keychain doesn't); see the interactive
+  // Biometric tab in the example app for hands-on coverage.
 
   // Final cleanup so the next launch starts blank.
   try {

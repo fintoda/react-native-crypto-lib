@@ -17,10 +17,12 @@ import {
 } from '@fintoda/react-native-crypto-lib';
 
 // Interactive test surface for the biometric (`accessControl: 'biometric'`)
-// path. Provisioning never prompts; reads / signs trigger the system
-// biometric dialog. Each row exercises one entrypoint and shows the
-// outcome plus how long it took (useful as evidence that the OS prompt
-// actually appeared rather than silently no-opping).
+// path. iOS: provisioning is silent, reads / signs trigger Face ID /
+// Touch ID. Android: BiometricPrompt is per-cipher-operation, so
+// provisioning ALSO prompts (the underlying Keystore key requires auth
+// for every encrypt or decrypt). Each row exercises one entrypoint and
+// shows the outcome plus ms timing (useful as evidence that the OS
+// prompt actually appeared rather than silently no-opping).
 
 type RunState =
   | { status: 'idle' }
@@ -224,17 +226,17 @@ export default function Biometric() {
       <Text style={styles.header}>Biometric (Phase 1)</Text>
       <Text style={styles.subtitle}>
         Each step exercises a `secureKV` entrypoint with{' '}
-        <Text style={styles.code}>accessControl: 'biometric'</Text>. Reads and
-        signs trigger a system biometric prompt; provisioning does not. On
-        Android, all 'biometric' steps refuse with a clear error pending the
-        Phase 2 implementation.
+        <Text style={styles.code}>accessControl: 'biometric'</Text>. iOS prompts
+        only on read / sign. Android (BiometricPrompt) prompts on every encrypt
+        / decrypt — provisioning will also show the prompt.
       </Text>
 
       {Platform.OS === 'android' && (
         <View style={styles.warn}>
           <Text style={styles.warnText}>
-            Running on Android. Provisioning steps will fail with "biometric is
-            not yet implemented" — this is expected.
+            Running on Android. BiometricPrompt requires API 28+ and an enrolled
+            fingerprint / face. Provisioning steps prompt too — seven prompts
+            total to run the full sequence.
           </Text>
         </View>
       )}

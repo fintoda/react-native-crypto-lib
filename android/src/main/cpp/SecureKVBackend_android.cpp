@@ -24,19 +24,32 @@ constexpr const char* kBridge =
 
 // JniException::what() looks like
 //   "com.fintoda.reactnativecryptolib.SecureKVUnavailableException: unavailable: ..."
-// We do a substring match on the class name and prefer the "unavailable: ..."
-// suffix in the rethrown reason so the JS wrapper can detect the special
-// SecureKVUnavailableError without us having to walk JThrowable manually.
+//   "com.fintoda.reactnativecryptolib.SecureKVBiometricException: secureKV.set: user canceled: ..."
+// We strip the FQCN prefix so the JS wrapper sees a clean "reason" string
+// it can split on a single ': '. SecureKVUnavailableException keeps the
+// "unavailable: " prefix so errors.ts can upgrade to SecureKVUnavailableError.
 [[noreturn]] void rethrow(const jni::JniException& e) {
   std::string what = e.what();
   bool unavailable =
     what.find("SecureKVUnavailableException") != std::string::npos;
-  size_t cut = what.find("unavailable");
-  if (unavailable && cut != std::string::npos) {
-    throw std::runtime_error(what.substr(cut));
-  }
+  bool biometric =
+    what.find("SecureKVBiometricException") != std::string::npos;
+
   if (unavailable) {
+    size_t cut = what.find("unavailable");
+    if (cut != std::string::npos) {
+      throw std::runtime_error(what.substr(cut));
+    }
     throw std::runtime_error("unavailable");
+  }
+  if (biometric) {
+    // Strip "com.fintoda...SecureKVBiometricException: " — the Kotlin
+    // message is already self-explanatory ("user canceled: ...").
+    size_t colonSpace = what.find(": ");
+    if (colonSpace != std::string::npos) {
+      throw std::runtime_error(what.substr(colonSpace + 2));
+    }
+    throw std::runtime_error(what);
   }
   throw std::runtime_error(what);
 }

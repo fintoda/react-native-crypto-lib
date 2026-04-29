@@ -544,11 +544,20 @@ try {
 }
 ```
 
-**Platform support — Phase 1.** iOS-only. The Keychain item is bound to
+**Platform support.** Both iOS and Android, with one UX divergence
+worth flagging up front: **iOS prompts only on read; Android prompts on
+every encrypt or decrypt — including provisioning.** This is intrinsic
+to the platforms (Keystore symmetric keys with
+`setUserAuthenticationRequired(true)` need biometric auth for both
+encrypt and decrypt, while iOS Keychain only evaluates the access
+control on read). Phase 3 will switch the Android path to a hybrid
+RSA-wrap-AES design so set is silent there too.
+
+**iOS.** The Keychain item is bound to
 `kSecAccessControlBiometryCurrentSet`, so re-enrolling biometrics
 (adding/removing a fingerprint or Face ID) **invalidates the item** —
-the threat model is "attacker steals the unlocked device and tries to
-add their own biometric." Subsequent reads will fail with
+threat model: "attacker steals the unlocked device and tries to add
+their own biometric." Subsequent reads will fail with
 `SecureKVUnavailableError` and the app should treat the data as lost.
 
 > **iOS host-app setup:** any app that uses Face ID must declare
@@ -563,12 +572,23 @@ add their own biometric." Subsequent reads will fail with
 > <string>Authenticate to use stored secrets.</string>
 > ```
 
-Android support is intentionally deferred: it requires plumbing the
-current `Activity` through to `BiometricPrompt`, plus a separate
-user-authentication-required Keystore master key. Provisioning a key
-with `accessControl: 'biometric'` on Android currently rejects with a
-clear `not yet implemented` error so the call site stays explicit
-rather than silently degrading to non-biometric.
+**Android.** Requires API 28+ (`BiometricPrompt`). The biometric master
+key uses `setInvalidatedByBiometricEnrollment(true)`, mirroring the iOS
+behaviour: re-enrolling biometrics drops the key. On API 30+ the gate
+is `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)` (Class 3
+biometric only, no PIN/pattern fallback). On API 28-29 the equivalent
+is `setUserAuthenticationValidityDurationSeconds(-1)`, which counts any
+device-unlock as auth at the Keystore layer; the BiometricPrompt at our
+call site still constrains the actual prompt to biometrics. Devices on
+API < 28 reject `accessControl: 'biometric'` with a clear error.
+
+> **Android host-app setup:** the host's `MainActivity` must inherit
+> from `FragmentActivity` (RN's `ReactActivity` already does, via
+> `AppCompatActivity`). The library's `ReactNativeCryptoLibPackage`
+> must be in the package list — autolinking handles this for most
+> apps, but if you have a custom `getPackages()`, include it manually.
+> The package eagerly registers a small companion module that hands
+> the current `Activity` to `BiometricPrompt`.
 
 A future release will add session windows
 (`{ accessControl: 'biometric'; validityWindow: N }`) so a single
