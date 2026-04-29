@@ -7,6 +7,7 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.UserNotAuthenticatedException
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.ReactApplicationContext
@@ -252,6 +253,51 @@ object SecureKVBridge {
 
   // --- Master key creation --------------------------------------------------
 
+  /**
+   * Checks that the device can actually run a biometric prompt before we
+   * try to create an auth-required Keystore key. Without this, the
+   * underlying `KeyGenerator.init()` throws a confusing
+   * `IllegalStateException: "At least one biometric must be enrolled..."`
+   * with no friendly hook for the caller to react to.
+   */
+  private fun assertBiometricAvailable() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+      throw SecureKVBiometricException(
+        "biometric: requires Android 9 (API 28) or newer; this device " +
+          "runs API ${Build.VERSION.SDK_INT}"
+      )
+    }
+    val bm = BiometricManager.from(appContext())
+    val status = bm.canAuthenticate(
+      BiometricManager.Authenticators.BIOMETRIC_STRONG
+    )
+    when (status) {
+      BiometricManager.BIOMETRIC_SUCCESS -> return
+      BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ->
+        throw SecureKVBiometricException(
+          "biometric: no biometric enrolled — open Settings > Security " +
+            "and add a fingerprint or face before using accessControl='biometric'"
+        )
+      BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE ->
+        throw SecureKVBiometricException(
+          "biometric: device has no biometric hardware (Class 3 / strong)"
+        )
+      BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE ->
+        throw SecureKVBiometricException(
+          "biometric: hardware temporarily unavailable; try again"
+        )
+      BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED ->
+        throw SecureKVBiometricException(
+          "biometric: a system security update is required before " +
+            "biometric auth can be used"
+        )
+      else ->
+        throw SecureKVBiometricException(
+          "biometric: not available (status code $status)"
+        )
+    }
+  }
+
   private fun getOrCreateMasterKey(variant: Int): SecretKey {
     synchronized(lock) {
       val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -259,13 +305,8 @@ object SecureKVBridge {
       val existing = ks.getKey(alias, null) as? SecretKey
       if (existing != null) return existing
 
-      if (variant == ACCESS_CONTROL_BIOMETRIC &&
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.P
-      ) {
-        throw SecureKVBiometricException(
-          "biometric: requires Android 9 (API 28) or newer; this device " +
-            "runs API ${Build.VERSION.SDK_INT}"
-        )
+      if (variant == ACCESS_CONTROL_BIOMETRIC) {
+        assertBiometricAvailable()
       }
 
       val gen = KeyGenerator.getInstance(
@@ -304,8 +345,22 @@ object SecureKVBridge {
         }
       }
 
-      gen.init(builder.build())
-      return gen.generateKey()
+      try {
+        gen.init(builder.build())
+        return gen.generateKey()
+      } catch (e: IllegalStateException) {
+        // Belt-and-braces: BiometricManager said SUCCESS, but Keystore
+        // still rejected because biometrics were unenrolled mid-flight,
+        // or the OEM's Keystore implementation is stricter. Surface as
+        // our biometric exception so the caller doesn't see a raw
+        // 'At least one biometric must be enrolled' stack trace.
+        if (variant == ACCESS_CONTROL_BIOMETRIC) {
+          throw SecureKVBiometricException(
+            "biometric: Keystore rejected key creation: ${e.message}"
+          )
+        }
+        throw e
+      }
     }
   }
 
