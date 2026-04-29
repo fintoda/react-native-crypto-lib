@@ -484,6 +484,136 @@ The store is per-app — two apps using this library on the same device
 have independent namespaces. Single-process only on Android: don't enable
 multi-process for the host app if you rely on `secureKV`.
 
+### Native-only signing
+
+The whole point of `secureKV` is to keep private material out of the JS
+heap. The `set / get` API alone gets you halfway: bytes go into the
+Keychain / Keystore once and stay there. The other half — *not letting
+the secret back into JS* during routine signing — is covered by the
+`secureKV.bip32.*` and `secureKV.raw.*` sub-APIs.
+
+Each call loads the encrypted blob from the platform store, decrypts in
+C++, runs the requested crypto primitive on the C++ stack, and `memzero`s
+every intermediate before returning. JS sees only the public output —
+signature, public key, ECDH shared point.
+
+Two slot families coexist with the generic blob slot:
+
+```ts
+// Once at provisioning. The 64-byte seed is in JS for one call,
+// then never again (you should overwrite the seed Uint8Array yourself).
+const seed = bip39.toSeed(mnemonic);
+secureKV.bip32.setSeed('wallet', seed);
+seed.fill(0);
+
+// Per signature. The derived private key never reaches JS.
+const digest = hash.sha256(txPreimage);
+const sig = secureKV.bip32.signEcdsa(
+  'wallet',
+  "m/44'/0'/0'/0/0",
+  digest,
+  'secp256k1'
+);
+
+// Bitcoin Taproot key-spend (BIP-86 / BIP-341).
+const taprootSig = secureKV.bip32.signSchnorrTaproot(
+  'wallet',
+  "m/86'/0'/0'/0/0",
+  digest
+  // optional 4th arg: merkleRoot for script-spend; omit for key-spend.
+);
+
+// One-off / imported keys with no BIP-32 hierarchy.
+secureKV.raw.setPrivate('imported', priv32, 'secp256k1');
+const sig2 = secureKV.raw.signEcdsa('imported', digest);
+```
+
+#### `secureKV.bip32` — BIP-32 / SLIP-10 derivation on a stored seed
+
+`setSeed(alias, seed)` accepts a 64-byte BIP-39 seed (the output of
+`bip39.toSeed`). Every read method derives a child key on the fly using
+trezor-crypto's BIP-32 / SLIP-10 implementation. `path` is either a
+string (`"m/44'/0'/0'/0/0"`) or an array of `number` indices — hardened
+indices have the `0x80000000` bit set.
+
+| method | returns | curves |
+|---|---|---|
+| `setSeed(alias, seed)` | — | — |
+| `fingerprint(alias, path, curve)` | `number` (4-byte BE fingerprint of the derived node) | secp256k1 / nist256p1 / ed25519 |
+| `getPublicKey(alias, path, curve, compact?)` | `Uint8Array` (33B compressed by default; 65B uncompressed for ECDSA curves; 32B for ed25519) | secp256k1 / nist256p1 / ed25519 |
+| `signEcdsa(alias, path, digest, curve)` | `{ signature: Uint8Array(64), recId: 0..3 }` (RFC 6979 deterministic, low-S) | secp256k1 / nist256p1 |
+| `signSchnorr(alias, path, digest, aux?)` | `Uint8Array(64)` (BIP-340) | secp256k1 (always) |
+| `signSchnorrTaproot(alias, path, digest, merkleRoot?)` | `Uint8Array(64)` (BIP-341 key/script-spend) | secp256k1 (always) |
+| `signEd25519(alias, path, msg)` | `Uint8Array(64)` (RFC 8032) | ed25519 (always) |
+| `ecdh(alias, path, peerPub, curve)` | `Uint8Array(33)` (compressed shared point) | secp256k1 / nist256p1 |
+
+`signSchnorrTaproot` is the convenience BIP-86 / BIP-341 path: it
+applies `H_TapTweak(pub, merkleRoot)` to the derived private key before
+signing. Without it, you'd need the untweaked private key on the JS
+side to call `schnorr.tweakPrivate`, which defeats the point.
+
+SLIP-10 ed25519 derivation accepts only hardened indices — non-hardened
+steps will throw. ECDSA / Schnorr derivation accepts both.
+
+#### `secureKV.raw` — single 32-byte private key, no derivation
+
+`setPrivate(alias, priv32, curve)` stores a plain 32-byte private key
+bound to one curve. Useful for keys imported from an external system
+(KMS export, paper wallet, channel funding key) where there's no
+BIP-32 hierarchy.
+
+| method | returns | requires |
+|---|---|---|
+| `setPrivate(alias, priv, curve)` | — | priv is 32 bytes; for ECDSA curves it must be in `[1, n-1]` (validated up-front) |
+| `getPublicKey(alias, compact?)` | `Uint8Array` (33B / 65B for ECDSA, 32B for ed25519) | curve from slot |
+| `signEcdsa(alias, digest)` | `{ signature, recId }` | slot curve must be secp256k1 / nist256p1 |
+| `signSchnorr(alias, digest, aux?)` | `Uint8Array(64)` | slot curve must be secp256k1 |
+| `signSchnorrTaproot(alias, digest, merkleRoot?)` | `Uint8Array(64)` | slot curve must be secp256k1 |
+| `signEd25519(alias, msg)` | `Uint8Array(64)` | slot curve must be ed25519 |
+| `ecdh(alias, peerPub)` | `Uint8Array(33)` | slot curve must be secp256k1 / nist256p1 |
+
+A method called against a slot with the wrong curve throws a
+`CryptoError` with reason `"slot curve is X, expected Y"` *before*
+touching any crypto.
+
+#### Slot format
+
+Internally each blob is one byte of type tag + payload. The tag lets
+sign-side methods reject mismatches early instead of mis-interpreting a
+generic blob as a seed (or vice versa). Format is an implementation
+detail — `set` / `get` users don't see it — but it's documented so a
+reviewer can audit `cpp/SecureKVSlot.h`:
+
+```
+0x00 — Blob:        payload = user bytes (secureKV.set)
+0x01 — Bip32Seed:   payload = 64 bytes (secureKV.bip32.setSeed)
+0x02 — RawPrivate:  payload = 1B curve_tag || 32B priv
+                    curve_tag: 0=secp256k1, 1=nist256p1, 2=ed25519
+                    (secureKV.raw.setPrivate)
+```
+
+A method that targets a different slot kind throws a `CryptoError`
+without revealing which kind is actually present beyond an enum-style
+label (`BLOB` / `SEED` / `RAW`).
+
+#### Native-only flow at a glance
+
+```
+JS  ──alias, path, digest──► JSI thunk (C++)
+                              │
+                              ├─► SecureKVBackend::get(alias) ─► Keychain / AndroidKeystore
+                              │   (returns std::vector<uint8_t> in C++, never crosses JSI)
+                              ├─► parseSlot → SEED + 64-byte payload
+                              ├─► hdnode_from_seed → root HDNode
+                              ├─► hdnode_private_ckd × N → leaf HDNode
+                              ├─► ecdsa_sign_digest / schnorr_internal::sign / ed25519_sign
+                              ├─► memzero(seed, root, leaf, intermediates, blob)
+                              └─► return ArrayBuffer(signature)  ◄── only this is visible to JS
+```
+
+The private scalar exists only on the C++ stack between the slot parse
+and the sign call, then is unconditionally zeroed.
+
 ```ts
 import { rng, secureKV } from '@fintoda/react-native-crypto-lib';
 

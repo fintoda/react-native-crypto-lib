@@ -160,5 +160,6 @@ void registerBip39Methods(MethodMap& map);
 void registerBip32Methods(MethodMap& map);
 void registerSlip39Methods(MethodMap& map);
 void registerSecureKVMethods(MethodMap& map);
+void registerSecureKVSignMethods(MethodMap& map);
 
 }

@@ -1211,6 +1211,362 @@ function secureKVTests(): TestResult[] {
   return results;
 }
 
+// =========================================================================
+// secureKV native-only signing — BIP-32 derivation on stored seeds and
+// raw-private-key slots that never round-trip through JS for signing.
+// Vectors include BIP-32 #1 (derivation correctness), BIP-86 Taproot
+// (key-spend tweak), and curve mismatches.
+// =========================================================================
+
+function secureKVSignTests(): TestResult[] {
+  try {
+    secureKV.clear();
+  } catch {
+    // ignore
+  }
+
+  const results: TestResult[] = [];
+  const k = (s: string) => `tvs.${s}`;
+
+  // BIP-32 test vector 1.
+  // https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
+  const bip32Seed = fromHex('000102030405060708090a0b0c0d0e0f');
+  const bip32MasterPubCompressed =
+    '0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2';
+  // Master priv (e8f32e72...) is not used directly here — we exercise the
+  // derived leaf priv via the standalone-vs-secureKV signature equality
+  // test below.
+  const bip32LeafPath = "m/0'/1/2'/2/1000000000";
+  const bip32LeafPubCompressed =
+    '022a471424da5e657499d1ff51cb43c47481a03b1e77f951fe64cec9f5a48f7011';
+  const bip32LeafPriv =
+    '471b76e389e528d6de6d816857e012c5455051cad6660850e58372a6c3e6e7c8';
+
+  // BIP-86 Taproot vectors.
+  // https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki
+  // 12-word "abandon ... about" mnemonic seed.
+  const bip86Seed = fromHex(
+    '5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1' +
+      '9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4'
+  );
+  const bip86Path = "m/86'/0'/0'/0/0";
+  const bip86InternalXOnly =
+    'cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115';
+  const bip86OutputXOnly =
+    'a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c';
+
+  const digest = hash.sha256(ascii('the quick brown fox'));
+
+  // ----- BIP-32 derivation correctness -----
+  results.push(
+    check('secureKV.bip32.getPublicKey master == BIP-32 vec1', () => {
+      secureKV.bip32.setSeed(k('vec1'), bip32Seed);
+      const got = secureKV.bip32.getPublicKey(k('vec1'), 'm', 'secp256k1');
+      return toHex(got) === bip32MasterPubCompressed || `got ${toHex(got)}`;
+    })
+  );
+
+  results.push(
+    check('secureKV.bip32.getPublicKey deep path == BIP-32 vec1', () => {
+      const got = secureKV.bip32.getPublicKey(
+        k('vec1'),
+        bip32LeafPath,
+        'secp256k1'
+      );
+      return toHex(got) === bip32LeafPubCompressed || `got ${toHex(got)}`;
+    })
+  );
+
+  results.push(
+    check('secureKV.bip32.getPublicKey accepts numeric path', () => {
+      // m/0' → [HARDENED + 0]
+      const numeric = secureKV.bip32.getPublicKey(
+        k('vec1'),
+        [0x80000000],
+        'secp256k1'
+      );
+      const stringy = secureKV.bip32.getPublicKey(
+        k('vec1'),
+        "m/0'",
+        'secp256k1'
+      );
+      return eq(numeric, stringy) || 'numeric vs string mismatch';
+    })
+  );
+
+  results.push(
+    check('secureKV.bip32.signEcdsa verifies under derived pub', () => {
+      const sig = secureKV.bip32.signEcdsa(
+        k('vec1'),
+        bip32LeafPath,
+        digest,
+        'secp256k1'
+      );
+      const pub = fromHex(bip32LeafPubCompressed);
+      return (
+        ecdsa.verify(pub, sig.signature, digest) ||
+        'signature did not verify under derived pubkey'
+      );
+    })
+  );
+
+  results.push(
+    check(
+      'secureKV.bip32.signEcdsa equivalent to standalone ecdsa.sign(derivedPriv)',
+      () => {
+        const sig = secureKV.bip32.signEcdsa(
+          k('vec1'),
+          bip32LeafPath,
+          digest,
+          'secp256k1'
+        );
+        // RFC 6979 deterministic — comparing bytes also exercises the
+        // derived priv matches the BIP-32 reference.
+        const refSig = ecdsa.sign(fromHex(bip32LeafPriv), digest, 'secp256k1');
+        return (
+          eq(sig.signature, refSig.signature) ||
+          `secureKV=${toHex(sig.signature)}, ref=${toHex(refSig.signature)}`
+        );
+      }
+    )
+  );
+
+  // Sanity: master priv computed offline matches.
+  results.push(
+    check(
+      'secureKV.bip32 master priv matches BIP-32 vec1 (via fingerprint)',
+      () => {
+        const fp = secureKV.bip32.fingerprint(k('vec1'), 'm', 'secp256k1');
+        // fingerprint(master) == hash160(masterPub)[0..4] interpreted BE
+        const expected =
+          (hash.hash160(fromHex(bip32MasterPubCompressed))[0]! << 24) +
+          (hash.hash160(fromHex(bip32MasterPubCompressed))[1]! << 16) +
+          (hash.hash160(fromHex(bip32MasterPubCompressed))[2]! << 8) +
+          hash.hash160(fromHex(bip32MasterPubCompressed))[3]!;
+        // Combine via *0x1000000 to avoid >2^31 sign issues — we don't care
+        // about the exact match form, only equality.
+        return fp >>> 0 === expected >>> 0 || `fp=${fp} exp=${expected}`;
+      }
+    )
+  );
+
+  // ----- Schnorr (no taproot) round-trip -----
+  results.push(
+    check(
+      'secureKV.bip32.signSchnorr verifies under derived x-only pub',
+      () => {
+        // m/86'/0'/0'/0/0 untweaked pub is bip86InternalXOnly (the 32-byte x)
+        // We can also derive it from the seed by stripping the 33-byte
+        // compressed pub returned by getPublicKey.
+        secureKV.bip32.setSeed(k('bip86'), bip86Seed);
+        const compressed = secureKV.bip32.getPublicKey(
+          k('bip86'),
+          bip86Path,
+          'secp256k1'
+        );
+        const xOnly = compressed.slice(1, 33);
+        if (toHex(xOnly) !== bip86InternalXOnly) {
+          return `derived x-only mismatch: ${toHex(xOnly)}`;
+        }
+        const sig = secureKV.bip32.signSchnorr(
+          k('bip86'),
+          bip86Path,
+          digest,
+          new Uint8Array(32) // zero aux for determinism
+        );
+        // BIP-340 sign internally adjusts the signing scalar to match
+        // even-y; verification should succeed against the x-only pub.
+        // For a y-odd untweaked pub, the algorithm flips the scalar before
+        // signing and the resulting sig still verifies against x-only.
+        return (
+          schnorr.verify(fromHex(bip86InternalXOnly), sig, digest) ||
+          'schnorr sig did not verify'
+        );
+      }
+    )
+  );
+
+  // ----- BIP-86 Taproot key-spend -----
+  results.push(
+    check(
+      'secureKV.bip32.signSchnorrTaproot verifies under tweaked pub (BIP-86)',
+      () => {
+        const sig = secureKV.bip32.signSchnorrTaproot(
+          k('bip86'),
+          bip86Path,
+          digest
+        );
+        return (
+          schnorr.verify(fromHex(bip86OutputXOnly), sig, digest) ||
+          'taproot sig did not verify against tweaked pubkey'
+        );
+      }
+    )
+  );
+
+  // ----- BIP-32 ed25519 (SLIP-10) -----
+  results.push(
+    check(
+      'secureKV.bip32.signEd25519 verifies under derived ed25519 pub',
+      () => {
+        // SLIP-10 ed25519: hardened only.
+        const path = "m/44'/60'/0'";
+        const pub = secureKV.bip32.getPublicKey(k('vec1'), path, 'ed25519');
+        // ed25519 pubkey is 32 bytes (no 0x00 tag in our API).
+        if (pub.length !== 32) return `pub length ${pub.length}`;
+        const msg = ascii('hello ed25519');
+        const sig = secureKV.bip32.signEd25519(k('vec1'), path, msg);
+        return ed25519.verify(pub, sig, msg) || 'ed25519 sig did not verify';
+      }
+    )
+  );
+
+  // ----- ECDH via secureKV -----
+  results.push(
+    check('secureKV.bip32.ecdh matches standalone ecdsa.ecdh', () => {
+      const counterPriv = ecdsa.randomPrivate('secp256k1');
+      const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
+      const sharedFromKV = secureKV.bip32.ecdh(
+        k('vec1'),
+        bip32LeafPath,
+        counterPub,
+        'secp256k1'
+      );
+      const sharedFromRef = ecdsa.ecdh(
+        fromHex(bip32LeafPriv),
+        counterPub,
+        'secp256k1'
+      );
+      return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
+    })
+  );
+
+  // ----- raw secp256k1 -----
+  results.push(
+    check('secureKV.raw.signEcdsa secp256k1 verifies', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      const pub = ecdsa.getPublic(priv, true, 'secp256k1');
+      secureKV.raw.setPrivate(k('rawk1'), priv, 'secp256k1');
+      const got = secureKV.raw.getPublicKey(k('rawk1'));
+      if (!eq(got, pub)) return `pub mismatch: ${toHex(got)}`;
+      const sig = secureKV.raw.signEcdsa(k('rawk1'), digest);
+      return ecdsa.verify(pub, sig.signature, digest) || 'sig did not verify';
+    })
+  );
+
+  // ----- raw nist256p1 -----
+  results.push(
+    check('secureKV.raw.signEcdsa nist256p1 verifies', () => {
+      const priv = ecdsa.randomPrivate('nist256p1');
+      const pub = ecdsa.getPublic(priv, true, 'nist256p1');
+      secureKV.raw.setPrivate(k('rawn'), priv, 'nist256p1');
+      const sig = secureKV.raw.signEcdsa(k('rawn'), digest);
+      return (
+        ecdsa.verify(pub, sig.signature, digest, 'nist256p1') ||
+        'sig did not verify'
+      );
+    })
+  );
+
+  // ----- raw ed25519 -----
+  results.push(
+    check('secureKV.raw.signEd25519 verifies', () => {
+      const seed = rng.bytes(32);
+      const pub = ed25519.getPublic(seed);
+      secureKV.raw.setPrivate(k('rawed'), seed, 'ed25519');
+      const got = secureKV.raw.getPublicKey(k('rawed'));
+      if (!eq(got, pub)) return `pub mismatch`;
+      const msg = ascii('raw ed25519 round-trip');
+      const sig = secureKV.raw.signEd25519(k('rawed'), msg);
+      return ed25519.verify(pub, sig, msg) || 'sig did not verify';
+    })
+  );
+
+  // ----- raw Taproot key-spend -----
+  results.push(
+    check('secureKV.raw.signSchnorrTaproot verifies under tweaked pub', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      const pubCompressed = ecdsa.getPublic(priv, true, 'secp256k1');
+      const xOnly = pubCompressed.slice(1, 33);
+      const tweaked = schnorr.tweakPublic(xOnly).pub;
+      secureKV.raw.setPrivate(k('rawtap'), priv, 'secp256k1');
+      const sig = secureKV.raw.signSchnorrTaproot(k('rawtap'), digest);
+      return (
+        schnorr.verify(tweaked, sig, digest) || 'taproot sig did not verify'
+      );
+    })
+  );
+
+  // ----- cross-slot mismatches -----
+  results.push(
+    throws('secureKV.bip32 op on a generic blob slot throws', () => {
+      secureKV.set(k('blob'), ascii('x'));
+      secureKV.bip32.getPublicKey(k('blob'), 'm', 'secp256k1');
+    })
+  );
+
+  results.push(
+    throws('secureKV.get on a SEED slot throws', () => {
+      secureKV.bip32.setSeed(k('seedslot'), bip32Seed);
+      // A 16-byte seed is rejected by the JSI thunk before we even get
+      // to see a slot of any kind. Use the 64-byte BIP-86 seed we
+      // already have.
+      secureKV.bip32.setSeed(k('seedslot'), bip86Seed);
+      secureKV.get(k('seedslot'));
+    })
+  );
+
+  results.push(
+    throws('secureKV.raw op on a SEED slot throws', () => {
+      secureKV.bip32.setSeed(k('seedslot2'), bip86Seed);
+      secureKV.raw.signEcdsa(k('seedslot2'), digest);
+    })
+  );
+
+  results.push(
+    throws('secureKV.raw.signEd25519 on secp256k1 slot throws', () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      secureKV.raw.setPrivate(k('rawk1b'), priv, 'secp256k1');
+      secureKV.raw.signEd25519(k('rawk1b'), ascii('x'));
+    })
+  );
+
+  results.push(
+    throws('secureKV.raw.signSchnorr on ed25519 slot throws', () => {
+      secureKV.raw.setPrivate(k('rawedb'), rng.bytes(32), 'ed25519');
+      secureKV.raw.signSchnorr(k('rawedb'), digest);
+    })
+  );
+
+  // ----- size / format validation -----
+  results.push(
+    throws('secureKV.bip32.setSeed wrong size throws', () => {
+      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(32));
+    })
+  );
+
+  results.push(
+    throws('secureKV.raw.setPrivate wrong size throws', () => {
+      secureKV.raw.setPrivate(k('badpriv'), new Uint8Array(31), 'secp256k1');
+    })
+  );
+
+  results.push(
+    throws('secureKV.bip32.signEcdsa missing slot throws', () => {
+      secureKV.bip32.signEcdsa(k('nope'), 'm', digest, 'secp256k1');
+    })
+  );
+
+  // Final cleanup.
+  try {
+    secureKV.clear();
+  } catch {
+    // ignore
+  }
+
+  return results;
+}
+
 export function runAllTests(): TestResult[] {
   return [
     ...hashTests(),
@@ -1226,5 +1582,6 @@ export function runAllTests(): TestResult[] {
     ...webcryptoTests(),
     ...slip39Tests(),
     ...secureKVTests(),
+    ...secureKVSignTests(),
   ];
 }

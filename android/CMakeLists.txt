@@ -66,6 +66,7 @@ add_library(
     ../cpp/Bip32.cpp
     ../cpp/Slip39.cpp
     ../cpp/SecureKV.cpp
+    ../cpp/SecureKVSign.cpp
     src/main/cpp/SecureKVBackend_android.cpp
     ${TREZOR_CRYPTO_SOURCES}
 )

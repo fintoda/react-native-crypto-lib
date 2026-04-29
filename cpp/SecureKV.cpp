@@ -1,5 +1,10 @@
 #include "Common.h"
 #include "SecureKVBackend.h"
+#include "SecureKVSlot.h"
+
+extern "C" {
+#include "memzero.h"
+}
 
 #include <stdexcept>
 #include <string>
@@ -46,11 +51,17 @@ jsi::Value invoke_set(
   if (len > kMaxValueLen) {
     throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
   }
+  // Wrap user bytes in a Blob (0x00) slot so that the typed sign-side
+  // APIs can reject mismatches at parse time rather than mis-interpret
+  // a raw blob as a seed / private key.
+  auto wrapped = wrapBlobSlot(safeData(rt, value), len);
   try {
-    SecureKVBackend::set(key, safeData(rt, value), len);
+    SecureKVBackend::set(key, wrapped.data(), wrapped.size());
   } catch (const std::exception& e) {
+    memzero(wrapped.data(), wrapped.size());
     wrap(rt, "secure_kv_set", e);
   }
+  memzero(wrapped.data(), wrapped.size());
   return jsi::Value::undefined();
 }
 
@@ -68,7 +79,19 @@ jsi::Value invoke_get(
   if (!result.has_value()) {
     return jsi::Value::null();
   }
-  return wrapDigest(rt, std::move(*result));
+  SlotView slot;
+  if (!parseSlot(result->data(), result->size(), slot) ||
+      slot.kind != SlotKind::Blob) {
+    memzero(result->data(), result->size());
+    throw jsi::JSError(
+      rt,
+      std::string("secure_kv_get: slot is ") + slotKindName(slot.kind) +
+        ", expected BLOB"
+    );
+  }
+  std::vector<uint8_t> out(slot.payload, slot.payload + slot.payloadLen);
+  memzero(result->data(), result->size());
+  return wrapDigest(rt, std::move(out));
 }
 
 jsi::Value invoke_has(

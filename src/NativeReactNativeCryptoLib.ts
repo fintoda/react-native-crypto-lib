@@ -257,6 +257,88 @@ export interface RawSpec {
   secure_kv_list(): string[];
   secure_kv_clear(): void;
   secure_kv_is_hardware_backed(): boolean;
+
+  /**
+   * Native-only signing on top of secureKV slots.
+   *
+   * Two slot families:
+   * - SEED  (set via `secure_kv_bip32_set_seed`): 64-byte BIP-39 seed.
+   *         The bip32_* read methods derive a child key from this seed
+   *         on the fly, sign with it, and zero everything before
+   *         returning. Curve is passed per call.
+   * - RAW   (set via `secure_kv_raw_set_private`): a single 32-byte
+   *         private scalar bound to a curve at provisioning time.
+   *         No derivation; the curve travels with the slot so the
+   *         raw_* sign methods don't take it as a parameter (it is
+   *         enforced from the slot).
+   *
+   * Path arguments are packed big-endian uint32 indices, 4*N bytes for
+   * an N-step path — same format as `bip32_derive`.
+   *
+   * `secure_kv_bip32_sign_ecdsa` and `secure_kv_raw_sign_ecdsa` return
+   * 65 bytes laid out as `[recId, sig[0..64]]`, matching `ecdsa_sign`.
+   */
+  secure_kv_bip32_set_seed(key: string, seed: ArrayBuffer): void;
+  secure_kv_bip32_fingerprint(
+    key: string,
+    path: ArrayBuffer,
+    curve: string
+  ): number;
+  secure_kv_bip32_get_public(
+    key: string,
+    path: ArrayBuffer,
+    curve: string,
+    compact: boolean
+  ): ArrayBuffer;
+  secure_kv_bip32_sign_ecdsa(
+    key: string,
+    path: ArrayBuffer,
+    digest: ArrayBuffer,
+    curve: string
+  ): ArrayBuffer;
+  secure_kv_bip32_sign_schnorr(
+    key: string,
+    path: ArrayBuffer,
+    digest: ArrayBuffer,
+    aux: ArrayBuffer | null
+  ): ArrayBuffer;
+  secure_kv_bip32_sign_schnorr_taproot(
+    key: string,
+    path: ArrayBuffer,
+    digest: ArrayBuffer,
+    merkleRoot: ArrayBuffer | null
+  ): ArrayBuffer;
+  secure_kv_bip32_sign_ed25519(
+    key: string,
+    path: ArrayBuffer,
+    msg: ArrayBuffer
+  ): ArrayBuffer;
+  secure_kv_bip32_ecdh(
+    key: string,
+    path: ArrayBuffer,
+    peerPub: ArrayBuffer,
+    curve: string
+  ): ArrayBuffer;
+
+  secure_kv_raw_set_private(
+    key: string,
+    priv: ArrayBuffer,
+    curve: string
+  ): void;
+  secure_kv_raw_get_public(key: string, compact: boolean): ArrayBuffer;
+  secure_kv_raw_sign_ecdsa(key: string, digest: ArrayBuffer): ArrayBuffer;
+  secure_kv_raw_sign_schnorr(
+    key: string,
+    digest: ArrayBuffer,
+    aux: ArrayBuffer | null
+  ): ArrayBuffer;
+  secure_kv_raw_sign_schnorr_taproot(
+    key: string,
+    digest: ArrayBuffer,
+    merkleRoot: ArrayBuffer | null
+  ): ArrayBuffer;
+  secure_kv_raw_sign_ed25519(key: string, msg: ArrayBuffer): ArrayBuffer;
+  secure_kv_raw_ecdh(key: string, peerPub: ArrayBuffer): ArrayBuffer;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeCryptoLib');
