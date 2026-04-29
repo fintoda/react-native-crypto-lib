@@ -121,6 +121,21 @@ ScrubbedSlot loadSlotOrThrow(
   return ScrubbedSlot{std::move(*result)};
 }
 
+// Parses the slot and throws on a zero-length / malformed blob. Mirrors
+// the defensive pattern in cpp/SecureKV.cpp's invoke_get; without it,
+// `SlotView` stays uninitialised and later `slot.kind` / `slot.payload`
+// reads operate on indeterminate memory.
+void parseSlotOrThrow(
+  jsi::Runtime& rt,
+  const char* op,
+  const ScrubbedSlot& blob,
+  SlotView& out
+) {
+  if (!parseSlot(blob.bytes.data(), blob.bytes.size(), out)) {
+    throw jsi::JSError(rt, std::string(op) + ": slot is empty or malformed");
+  }
+}
+
 void requireSlotKind(
   jsi::Runtime& rt,
   const char* op,
@@ -284,7 +299,7 @@ jsi::Value bip32_fingerprint_sync(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -314,7 +329,7 @@ jsi::Value bip32_get_public_sync(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -369,7 +384,7 @@ jsi::Value bip32_sign_ecdsa_sync(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -422,7 +437,7 @@ jsi::Value bip32_sign_schnorr_impl(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -470,7 +485,7 @@ jsi::Value bip32_sign_ed25519_sync(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -509,7 +524,7 @@ jsi::Value bip32_ecdh_sync(
 
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
   requireSeedPayloadLen(rt, op, slot);
 
@@ -586,7 +601,7 @@ void loadRawKey(
 ) {
   ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
   SlotView slot;
-  parseSlot(blob.bytes.data(), blob.bytes.size(), slot);
+  parseSlotOrThrow(rt, op, blob, slot);
   requireSlotKind(rt, op, slot, SlotKind::RawPrivate);
   requirePayloadLen(rt, op, slot, kRawPayloadLen);
 

@@ -1406,6 +1406,9 @@ async function secureKVSignTests(): Promise<TestResult[]> {
           'm',
           'secp256k1'
         );
+        // fingerprint(master) == hash160(masterPub)[0..4] reinterpreted as
+        // a big-endian uint32. Using >>> below to coerce to unsigned 32-bit
+        // since the manual shift can exceed 2**31 and turn negative.
         const expected =
           (hash.hash160(fromHex(bip32MasterPubCompressed))[0]! << 24) +
           (hash.hash160(fromHex(bip32MasterPubCompressed))[1]! << 16) +
