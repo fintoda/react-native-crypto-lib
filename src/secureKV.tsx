@@ -7,7 +7,7 @@ import { type Curve, type EcdsaSignature } from './ecdsa';
  */
 export type AccessControl = 'none';
 
-const unsupported = (): never => {
+const unsupported = async (): Promise<never> => {
   throw new Error(
     "'@fintoda/react-native-crypto-lib' is only supported on native platforms."
   );
@@ -19,56 +19,56 @@ export const secureKV = {
     key: string,
     value: Uint8Array,
     accessControl?: AccessControl
-  ) => void,
-  get: unsupported as (key: string) => Uint8Array | null,
-  has: unsupported as (key: string) => boolean,
-  delete: unsupported as (key: string) => void,
-  list: unsupported as () => string[],
-  clear: unsupported as () => void,
-  isHardwareBacked: unsupported as () => boolean,
+  ) => Promise<void>,
+  get: unsupported as (key: string) => Promise<Uint8Array | null>,
+  has: unsupported as (key: string) => Promise<boolean>,
+  delete: unsupported as (key: string) => Promise<void>,
+  list: unsupported as () => Promise<string[]>,
+  clear: unsupported as () => Promise<void>,
+  isHardwareBacked: unsupported as () => Promise<boolean>,
 
   bip32: {
-    setSeed: unsupported as (alias: string, seed: Uint8Array) => void,
+    setSeed: unsupported as (alias: string, seed: Uint8Array) => Promise<void>,
     fingerprint: unsupported as (
       alias: string,
       path: string | number[],
       curve: Bip32Curve
-    ) => number,
+    ) => Promise<number>,
     getPublicKey: unsupported as (
       alias: string,
       path: string | number[],
       curve: Bip32Curve,
       compact?: boolean
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     signEcdsa: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       curve: Curve
-    ) => EcdsaSignature,
+    ) => Promise<EcdsaSignature>,
     signSchnorr: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       aux?: Uint8Array
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     signSchnorrTaproot: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       merkleRoot?: Uint8Array
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     signEd25519: unsupported as (
       alias: string,
       path: string | number[],
       msg: Uint8Array
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     ecdh: unsupported as (
       alias: string,
       path: string | number[],
       peerPub: Uint8Array,
       curve: Curve
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
   },
 
   raw: {
@@ -76,26 +76,32 @@ export const secureKV = {
       alias: string,
       priv: Uint8Array,
       curve: Bip32Curve
-    ) => void,
+    ) => Promise<void>,
     getPublicKey: unsupported as (
       alias: string,
       compact?: boolean
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     signEcdsa: unsupported as (
       alias: string,
       digest: Uint8Array
-    ) => EcdsaSignature,
+    ) => Promise<EcdsaSignature>,
     signSchnorr: unsupported as (
       alias: string,
       digest: Uint8Array,
       aux?: Uint8Array
-    ) => Uint8Array,
+    ) => Promise<Uint8Array>,
     signSchnorrTaproot: unsupported as (
       alias: string,
       digest: Uint8Array,
       merkleRoot?: Uint8Array
-    ) => Uint8Array,
-    signEd25519: unsupported as (alias: string, msg: Uint8Array) => Uint8Array,
-    ecdh: unsupported as (alias: string, peerPub: Uint8Array) => Uint8Array,
+    ) => Promise<Uint8Array>,
+    signEd25519: unsupported as (
+      alias: string,
+      msg: Uint8Array
+    ) => Promise<Uint8Array>,
+    ecdh: unsupported as (
+      alias: string,
+      peerPub: Uint8Array
+    ) => Promise<Uint8Array>,
   },
 };

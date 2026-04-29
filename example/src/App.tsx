@@ -10,11 +10,9 @@ function TestVectors() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      setResults(runAllTests());
-    } catch (e: unknown) {
-      setError(String(e));
-    }
+    runAllTests()
+      .then(setResults)
+      .catch((e: unknown) => setError(String(e)));
   }, []);
 
   const passed = results.filter((r) => r.pass).length;

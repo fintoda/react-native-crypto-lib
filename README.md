@@ -2,9 +2,10 @@
 
 A comprehensive cryptography library for React Native, backed by a vendored
 [trezor-crypto](https://github.com/trezor/trezor-firmware/tree/main/crypto)
-C core and exposed as a synchronous JSI / Turbo Module. Zero-copy
-`ArrayBuffer` transfers, no base64 bridge hops, no promises for operations
-that don't need them.
+C core and exposed as a JSI / Turbo Module. Zero-copy `ArrayBuffer`
+transfers, no base64 bridge hops. Crypto primitives are sync; the
+hardware-backed `secureKV` namespace is async because it crosses an
+OS-IO / Keychain boundary.
 
 - **Hashes**: SHA-1/256/384/512, SHA3-256/512, Keccak-256/512, RIPEMD-160,
   BLAKE-256, BLAKE2b, BLAKE2s, Groestl-512, SHA-256d, Hash160.
@@ -436,9 +437,13 @@ const recovered = slip39.combine(
 
 ## secureKV
 
-Hardware-backed key/value storage. Synchronous `Uint8Array` API matching
-the rest of the library — no Promises, no string encoding hop, secrets
-stay as bytes from the Keychain / Keystore boundary up to your hands.
+Hardware-backed key/value storage. `Uint8Array`-in / `Uint8Array`-out —
+no string encoding hop, secrets stay as bytes from the Keychain /
+Keystore boundary up to your hands. Unlike the rest of the library,
+this API is **async** (`Promise`-returning): every method touches OS
+IO (Keychain item / Keystore master key / blob file) and a future
+biometric-prompt path will layer in via the same call sites without
+changing them.
 
 The motivation is to keep private material out of the JS heap. Generating
 or importing a key still touches JS once, but storing and reading it back
@@ -466,27 +471,35 @@ import {
 
 ### API
 
-- `secureKV.set(key, value, accessControl? = 'none')` — store
-  `value: Uint8Array` under `key`. Silently overwrites an existing
-  value. `accessControl` is currently restricted to `'none'`; it's
-  reserved for future biometric / user-presence gating without
-  breaking call sites.
-- `secureKV.get(key)` → `Uint8Array | null`. Returns `null` if the key
-  was never set or has been deleted. Throws `SecureKVUnavailableError`
-  if the OS-managed master key has been invalidated (factory reset,
-  some screen-lock changes on Android).
-- `secureKV.has(key)` → `boolean`.
-- `secureKV.delete(key)` — idempotent; deleting a missing key is a no-op.
-- `secureKV.list()` → `string[]` of all keys currently stored. Skips
-  individual blobs whose authentication tag fails (orphans of a prior
-  key generation), but throws `SecureKVUnavailableError` if the master
-  key itself is gone — matching `get()`'s behaviour so a wiped store
-  doesn't silently look like an empty one.
-- `secureKV.clear()` — wipe all keys belonging to this app.
-- `secureKV.isHardwareBacked()` → `boolean`. Informational. iOS always
-  reports `true` (Keychain is always Secure Enclave-protected with
-  `*ThisDeviceOnly` accessibility); Android reports whether the master
-  key landed in TEE / StrongBox vs. software keystore.
+> All `secureKV.*` methods return `Promise<...>` — this is the only
+> domain in the library that crosses an OS-IO / Keychain boundary, so
+> the API is async end to end. Validation errors surface as Promise
+> rejections too, so a single `try/await` catches everything.
+
+- `secureKV.set(key, value, accessControl? = 'none')` →
+  `Promise<void>`. Stores `value: Uint8Array` under `key`. Silently
+  overwrites an existing value. `accessControl` is currently restricted
+  to `'none'`; it's reserved for future biometric / user-presence
+  gating without breaking call sites.
+- `secureKV.get(key)` → `Promise<Uint8Array | null>`. Resolves to `null`
+  if the key was never set or has been deleted. Rejects with
+  `SecureKVUnavailableError` if the OS-managed master key has been
+  invalidated (factory reset, some screen-lock changes on Android).
+- `secureKV.has(key)` → `Promise<boolean>`.
+- `secureKV.delete(key)` → `Promise<void>` — idempotent; deleting a
+  missing key is a no-op.
+- `secureKV.list()` → `Promise<string[]>` of all keys currently stored.
+  Skips individual blobs whose authentication tag fails (orphans of a
+  prior key generation), but rejects with `SecureKVUnavailableError`
+  if the master key itself is gone — matching `get()`'s behaviour so a
+  wiped store doesn't silently look like an empty one.
+- `secureKV.clear()` → `Promise<void>` — wipe all keys belonging to
+  this app.
+- `secureKV.isHardwareBacked()` → `Promise<boolean>`. Informational.
+  iOS always resolves to `true` (Keychain is always Secure
+  Enclave-protected with `*ThisDeviceOnly` accessibility); Android
+  reports whether the master key landed in TEE / StrongBox vs. software
+  keystore.
 
 `key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
 The store is per-app — two apps using this library on the same device
@@ -517,12 +530,12 @@ Two slot families coexist with the generic blob slot:
 // Once at provisioning. The 64-byte seed is in JS for one call,
 // then never again (you should overwrite the seed Uint8Array yourself).
 const seed = bip39.toSeed(mnemonic);
-secureKV.bip32.setSeed('wallet', seed);
+await secureKV.bip32.setSeed('wallet', seed);
 seed.fill(0);
 
 // Per signature. The derived private key never reaches JS.
 const digest = hash.sha256(txPreimage);
-const sig = secureKV.bip32.signEcdsa(
+const sig = await secureKV.bip32.signEcdsa(
   'wallet',
   "m/44'/0'/0'/0/0",
   digest,
@@ -530,7 +543,7 @@ const sig = secureKV.bip32.signEcdsa(
 );
 
 // Bitcoin Taproot key-spend (BIP-86 / BIP-341).
-const taprootSig = secureKV.bip32.signSchnorrTaproot(
+const taprootSig = await secureKV.bip32.signSchnorrTaproot(
   'wallet',
   "m/86'/0'/0'/0/0",
   digest
@@ -538,8 +551,8 @@ const taprootSig = secureKV.bip32.signSchnorrTaproot(
 );
 
 // One-off / imported keys with no BIP-32 hierarchy.
-secureKV.raw.setPrivate('imported', priv32, 'secp256k1');
-const sig2 = secureKV.raw.signEcdsa('imported', digest);
+await secureKV.raw.setPrivate('imported', priv32, 'secp256k1');
+const sig2 = await secureKV.raw.signEcdsa('imported', digest);
 ```
 
 #### `secureKV.bip32` — BIP-32 / SLIP-10 derivation on a stored seed
@@ -552,9 +565,12 @@ trezor-crypto's BIP-32 / SLIP-10 implementation. `path` is either a
 string (`"m/44'/0'/0'/0/0"`) or an array of `number` indices — hardened
 indices have the `0x80000000` bit set.
 
-| method | returns | curves |
+All methods are async; the table elides the `Promise<...>` wrapper for
+brevity. `await` everything.
+
+| method | resolves to | curves |
 |---|---|---|
-| `setSeed(alias, seed)` | — | — |
+| `setSeed(alias, seed)` | `void` | — |
 | `fingerprint(alias, path, curve)` | `number` (4-byte BE fingerprint of the derived node) | secp256k1 / nist256p1 / ed25519 |
 | `getPublicKey(alias, path, curve, compact?)` | `Uint8Array` (33B compressed by default; 65B uncompressed for ECDSA curves; 32B for ed25519) | secp256k1 / nist256p1 / ed25519 |
 | `signEcdsa(alias, path, digest, curve)` | `{ signature: Uint8Array(64), recId: 0..3 }` (RFC 6979 deterministic, low-S) | secp256k1 / nist256p1 |
@@ -578,9 +594,11 @@ bound to one curve. Useful for keys imported from an external system
 (KMS export, paper wallet, channel funding key) where there's no
 BIP-32 hierarchy.
 
-| method | returns | requires |
+All methods are async; the table elides the `Promise<...>` wrapper.
+
+| method | resolves to | requires |
 |---|---|---|
-| `setPrivate(alias, priv, curve)` | — | priv is 32 bytes; for ECDSA curves it must be in `[1, n-1]` (validated up-front) |
+| `setPrivate(alias, priv, curve)` | `void` | priv is 32 bytes; for ECDSA curves it must be in `[1, n-1]` (validated up-front) |
 | `getPublicKey(alias, compact?)` | `Uint8Array` (33B / 65B for ECDSA, 32B for ed25519) | curve from slot |
 | `signEcdsa(alias, digest)` | `{ signature, recId }` | slot curve must be secp256k1 / nist256p1 |
 | `signSchnorr(alias, digest, aux?)` | `Uint8Array(64)` | slot curve must be secp256k1 |
@@ -588,8 +606,8 @@ BIP-32 hierarchy.
 | `signEd25519(alias, msg)` | `Uint8Array(64)` | slot curve must be ed25519 |
 | `ecdh(alias, peerPub)` | `Uint8Array(33)` | slot curve must be secp256k1 / nist256p1 |
 
-A method called against a slot with the wrong curve throws a
-`CryptoError` with reason `"slot curve is X, expected Y"` *before*
+A method called against a slot with the wrong curve rejects with a
+`CryptoError` whose reason is `"slot curve is X, expected Y"` *before*
 touching any crypto.
 
 #### Slot format
@@ -635,11 +653,11 @@ import { rng, secureKV } from '@fintoda/react-native-crypto-lib';
 
 // One-time provision
 const seed = rng.bytes(32);
-secureKV.set('wallet.seed', seed);
+await secureKV.set('wallet.seed', seed);
 seed.fill(0);
 
 // Later
-const restored = secureKV.get('wallet.seed');
+const restored = await secureKV.get('wallet.seed');
 if (!restored) throw new Error('seed missing');
 ```
 
@@ -774,7 +792,7 @@ Do not store anything here that you need to survive these events:
   surfacing as `SecureKVUnavailableError` on the next `get()`.
 
 When a backend reports the master key is no longer usable,
-`secureKV.get()` (and `list()`) throws `SecureKVUnavailableError`
+`secureKV.get()` (and `list()`) reject with `SecureKVUnavailableError`
 (`extends CryptoError`). Callers should catch this and re-derive their
 secrets from a recovery source rather than retry blindly.
 
@@ -841,7 +859,11 @@ installCryptoPolyfill();
 
 ## Compatibility notes
 
-- All public APIs are **synchronous**. No promises, no awaits.
+- The crypto-primitive APIs (`hash`, `mac`, `kdf`, `rng`, `ecdsa`,
+  `schnorr`, `ed25519`, `aes`, `bip39`, `bip32`, `slip39`, `ecc`,
+  `webcrypto`) are **synchronous**. The `secureKV` namespace is
+  **async** because it crosses an OS-IO / Keychain boundary — `await`
+  every call.
 - Inputs are always `Uint8Array`; outputs are always fresh
   `Uint8Array` views. Nothing is base64 at the edge.
 - Key formats match the wider ecosystem: compressed (33 B) and

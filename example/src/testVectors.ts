@@ -68,6 +68,34 @@ function throws(name: string, fn: () => void): TestResult {
   }
 }
 
+// Async equivalents used by secureKV tests, whose entire API is
+// Promise-returning. The wrappers swallow rejections the same way the
+// sync helpers swallow throws so each test contributes one TestResult.
+async function checkAsync(
+  name: string,
+  fn: () => Promise<boolean | string>
+): Promise<TestResult> {
+  try {
+    const r = await fn();
+    if (typeof r === 'string') return { name, pass: false, detail: r };
+    return { name, pass: r };
+  } catch (e: unknown) {
+    return { name, pass: false, detail: String(e) };
+  }
+}
+
+async function throwsAsync(
+  name: string,
+  fn: () => Promise<void>
+): Promise<TestResult> {
+  try {
+    await fn();
+    return { name, pass: false, detail: 'did not throw' };
+  } catch {
+    return { name, pass: true };
+  }
+}
+
 // =========================================================================
 // HASH — NIST FIPS 180-4, FIPS 202, well-known vectors
 // =========================================================================
@@ -1072,11 +1100,11 @@ function slip39Tests(): TestResult[] {
 // required to isolate from previous runs and to leave the device clean.
 // =========================================================================
 
-function secureKVTests(): TestResult[] {
+async function secureKVTests(): Promise<TestResult[]> {
   // Snapshot any keys the host left around, then wipe so each suite run
   // starts clean. We restore nothing — this is a debug app.
   try {
-    secureKV.clear();
+    await secureKV.clear();
   } catch {
     // ignore: if clear fails, the individual asserts will report it
   }
@@ -1085,103 +1113,113 @@ function secureKVTests(): TestResult[] {
   const k = (s: string) => `tv.${s}`; // namespace test keys
 
   results.push(
-    check('secureKV round-trip 32 bytes', () => {
+    await checkAsync('secureKV round-trip 32 bytes', async () => {
       const value = fromHex(
         'a1b2c3d4e5f60718' +
           '293a4b5c6d7e8f90' +
           '1122334455667788' +
           '99aabbccddeeff00'
       );
-      secureKV.set(k('seed'), value);
-      const got = secureKV.get(k('seed'));
+      await secureKV.set(k('seed'), value);
+      const got = await secureKV.get(k('seed'));
       if (got === null) return 'returned null';
       return eq(got, value) || `got ${toHex(got)}`;
     })
   );
 
   results.push(
-    check('secureKV get unknown key returns null', () => {
-      return secureKV.get(k('does-not-exist')) === null;
+    await checkAsync('secureKV get unknown key returns null', async () => {
+      return (await secureKV.get(k('does-not-exist'))) === null;
     })
   );
 
   results.push(
-    check('secureKV has true after set, false after delete', () => {
-      secureKV.set(k('flag'), ascii('1'));
-      if (!secureKV.has(k('flag'))) return 'has=false right after set';
-      secureKV.delete(k('flag'));
-      return !secureKV.has(k('flag'));
-    })
+    await checkAsync(
+      'secureKV has true after set, false after delete',
+      async () => {
+        await secureKV.set(k('flag'), ascii('1'));
+        if (!(await secureKV.has(k('flag'))))
+          return 'has=false right after set';
+        await secureKV.delete(k('flag'));
+        return !(await secureKV.has(k('flag')));
+      }
+    )
   );
 
   results.push(
-    check('secureKV overwrite returns the second value', () => {
-      secureKV.set(k('over'), ascii('first'));
-      secureKV.set(k('over'), ascii('second'));
-      const got = secureKV.get(k('over'));
-      if (got === null) return 'null after overwrite';
-      return eq(got, ascii('second')) || `got ${toHex(got)}`;
-    })
+    await checkAsync(
+      'secureKV overwrite returns the second value',
+      async () => {
+        await secureKV.set(k('over'), ascii('first'));
+        await secureKV.set(k('over'), ascii('second'));
+        const got = await secureKV.get(k('over'));
+        if (got === null) return 'null after overwrite';
+        return eq(got, ascii('second')) || `got ${toHex(got)}`;
+      }
+    )
   );
 
   results.push(
-    check('secureKV delete is idempotent on unknown key', () => {
-      secureKV.delete(k('never-existed'));
-      return true;
-    })
+    await checkAsync(
+      'secureKV delete is idempotent on unknown key',
+      async () => {
+        await secureKV.delete(k('never-existed'));
+        return true;
+      }
+    )
   );
 
   results.push(
-    check('secureKV empty value round-trips', () => {
-      secureKV.set(k('empty'), new Uint8Array(0));
-      const got = secureKV.get(k('empty'));
+    await checkAsync('secureKV empty value round-trips', async () => {
+      await secureKV.set(k('empty'), new Uint8Array(0));
+      const got = await secureKV.get(k('empty'));
       if (got === null) return 'null after empty set';
       return got.length === 0 || `length=${got.length}`;
     })
   );
 
   results.push(
-    check('secureKV value at 64 KiB limit succeeds', () => {
+    await checkAsync('secureKV value at 64 KiB limit succeeds', async () => {
       const big = new Uint8Array(65536);
       for (let i = 0; i < big.length; i++) big[i] = i & 0xff;
-      secureKV.set(k('big'), big);
-      const got = secureKV.get(k('big'));
+      await secureKV.set(k('big'), big);
+      const got = await secureKV.get(k('big'));
       if (got === null) return 'null after big set';
       return eq(got, big) || 'mismatch';
     })
   );
 
   results.push(
-    throws('secureKV value over 64 KiB throws', () => {
-      secureKV.set(k('toobig'), new Uint8Array(65537));
+    await throwsAsync('secureKV value over 64 KiB throws', async () => {
+      await secureKV.set(k('toobig'), new Uint8Array(65537));
     })
   );
 
   results.push(
-    throws('secureKV empty key throws', () => {
-      secureKV.set('', ascii('x'));
+    await throwsAsync('secureKV empty key throws', async () => {
+      await secureKV.set('', ascii('x'));
     })
   );
 
   results.push(
-    throws('secureKV key with invalid char throws', () => {
-      secureKV.set('bad/key', ascii('x'));
+    await throwsAsync('secureKV key with invalid char throws', async () => {
+      await secureKV.set('bad/key', ascii('x'));
     })
   );
 
   results.push(
-    throws('secureKV key over 128 chars throws', () => {
-      secureKV.set('a'.repeat(129), ascii('x'));
+    await throwsAsync('secureKV key over 128 chars throws', async () => {
+      await secureKV.set('a'.repeat(129), ascii('x'));
     })
   );
 
   results.push(
-    check('secureKV list and clear', () => {
-      secureKV.clear();
-      secureKV.set(k('a'), ascii('1'));
-      secureKV.set(k('b'), ascii('2'));
-      secureKV.set(k('c'), ascii('3'));
-      const all = secureKV.list().sort();
+    await checkAsync('secureKV list and clear', async () => {
+      await secureKV.clear();
+      await secureKV.set(k('a'), ascii('1'));
+      await secureKV.set(k('b'), ascii('2'));
+      await secureKV.set(k('c'), ascii('3'));
+      const all = (await secureKV.list()).sort();
       const expected = [k('a'), k('b'), k('c')].sort();
       const listed =
         all.length === 3 &&
@@ -1189,14 +1227,14 @@ function secureKVTests(): TestResult[] {
         all[1] === expected[1] &&
         all[2] === expected[2];
       if (!listed) return `list=${JSON.stringify(all)}`;
-      secureKV.clear();
-      return secureKV.list().length === 0 || 'non-empty after clear';
+      await secureKV.clear();
+      return (await secureKV.list()).length === 0 || 'non-empty after clear';
     })
   );
 
   results.push(
-    check('secureKV isHardwareBacked returns boolean', () => {
-      const v = secureKV.isHardwareBacked();
+    await checkAsync('secureKV isHardwareBacked returns boolean', async () => {
+      const v = await secureKV.isHardwareBacked();
       return typeof v === 'boolean';
     })
   );
@@ -1204,14 +1242,17 @@ function secureKVTests(): TestResult[] {
   // accessControl is reserved for future biometric gating; only 'none' is
   // accepted today, anything else MUST be rejected up-front.
   results.push(
-    throws('secureKV.set accessControl="biometric" rejected', () => {
-      secureKV.set(k('ac'), ascii('x'), 'biometric' as any);
-    })
+    await throwsAsync(
+      'secureKV.set accessControl="biometric" rejected',
+      async () => {
+        await secureKV.set(k('ac'), ascii('x'), 'biometric' as any);
+      }
+    )
   );
 
   // Final cleanup so the next launch starts blank.
   try {
-    secureKV.clear();
+    await secureKV.clear();
   } catch {
     // ignore
   }
@@ -1226,9 +1267,9 @@ function secureKVTests(): TestResult[] {
 // (key-spend tweak), and curve mismatches.
 // =========================================================================
 
-function secureKVSignTests(): TestResult[] {
+async function secureKVSignTests(): Promise<TestResult[]> {
   try {
-    secureKV.clear();
+    await secureKV.clear();
   } catch {
     // ignore
   }
@@ -1267,62 +1308,78 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- BIP-32 derivation correctness -----
   results.push(
-    check('secureKV.bip32.getPublicKey master == BIP-32 vec1', () => {
-      secureKV.bip32.setSeed(k('vec1'), bip32Seed);
-      const got = secureKV.bip32.getPublicKey(k('vec1'), 'm', 'secp256k1');
-      return toHex(got) === bip32MasterPubCompressed || `got ${toHex(got)}`;
-    })
+    await checkAsync(
+      'secureKV.bip32.getPublicKey master == BIP-32 vec1',
+      async () => {
+        await secureKV.bip32.setSeed(k('vec1'), bip32Seed);
+        const got = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          'm',
+          'secp256k1'
+        );
+        return toHex(got) === bip32MasterPubCompressed || `got ${toHex(got)}`;
+      }
+    )
   );
 
   results.push(
-    check('secureKV.bip32.getPublicKey deep path == BIP-32 vec1', () => {
-      const got = secureKV.bip32.getPublicKey(
-        k('vec1'),
-        bip32LeafPath,
-        'secp256k1'
-      );
-      return toHex(got) === bip32LeafPubCompressed || `got ${toHex(got)}`;
-    })
+    await checkAsync(
+      'secureKV.bip32.getPublicKey deep path == BIP-32 vec1',
+      async () => {
+        const got = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          bip32LeafPath,
+          'secp256k1'
+        );
+        return toHex(got) === bip32LeafPubCompressed || `got ${toHex(got)}`;
+      }
+    )
   );
 
   results.push(
-    check('secureKV.bip32.getPublicKey accepts numeric path', () => {
-      // m/0' → [HARDENED + 0]
-      const numeric = secureKV.bip32.getPublicKey(
-        k('vec1'),
-        [0x80000000],
-        'secp256k1'
-      );
-      const stringy = secureKV.bip32.getPublicKey(
-        k('vec1'),
-        "m/0'",
-        'secp256k1'
-      );
-      return eq(numeric, stringy) || 'numeric vs string mismatch';
-    })
+    await checkAsync(
+      'secureKV.bip32.getPublicKey accepts numeric path',
+      async () => {
+        // m/0' → [HARDENED + 0]
+        const numeric = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          [0x80000000],
+          'secp256k1'
+        );
+        const stringy = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          "m/0'",
+          'secp256k1'
+        );
+        return eq(numeric, stringy) || 'numeric vs string mismatch';
+      }
+    )
   );
 
   results.push(
-    check('secureKV.bip32.signEcdsa verifies under derived pub', () => {
-      const sig = secureKV.bip32.signEcdsa(
-        k('vec1'),
-        bip32LeafPath,
-        digest,
-        'secp256k1'
-      );
-      const pub = fromHex(bip32LeafPubCompressed);
-      return (
-        ecdsa.verify(pub, sig.signature, digest) ||
-        'signature did not verify under derived pubkey'
-      );
-    })
+    await checkAsync(
+      'secureKV.bip32.signEcdsa verifies under derived pub',
+      async () => {
+        const sig = await secureKV.bip32.signEcdsa(
+          k('vec1'),
+          bip32LeafPath,
+          digest,
+          'secp256k1'
+        );
+        const pub = fromHex(bip32LeafPubCompressed);
+        return (
+          ecdsa.verify(pub, sig.signature, digest) ||
+          'signature did not verify under derived pubkey'
+        );
+      }
+    )
   );
 
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32.signEcdsa equivalent to standalone ecdsa.sign(derivedPriv)',
-      () => {
-        const sig = secureKV.bip32.signEcdsa(
+      async () => {
+        const sig = await secureKV.bip32.signEcdsa(
           k('vec1'),
           bip32LeafPath,
           digest,
@@ -1341,18 +1398,19 @@ function secureKVSignTests(): TestResult[] {
 
   // Sanity: master priv computed offline matches.
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32 master priv matches BIP-32 vec1 (via fingerprint)',
-      () => {
-        const fp = secureKV.bip32.fingerprint(k('vec1'), 'm', 'secp256k1');
-        // fingerprint(master) == hash160(masterPub)[0..4] interpreted BE
+      async () => {
+        const fp = await secureKV.bip32.fingerprint(
+          k('vec1'),
+          'm',
+          'secp256k1'
+        );
         const expected =
           (hash.hash160(fromHex(bip32MasterPubCompressed))[0]! << 24) +
           (hash.hash160(fromHex(bip32MasterPubCompressed))[1]! << 16) +
           (hash.hash160(fromHex(bip32MasterPubCompressed))[2]! << 8) +
           hash.hash160(fromHex(bip32MasterPubCompressed))[3]!;
-        // Combine via *0x1000000 to avoid >2^31 sign issues — we don't care
-        // about the exact match form, only equality.
         return fp >>> 0 === expected >>> 0 || `fp=${fp} exp=${expected}`;
       }
     )
@@ -1360,14 +1418,11 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- Schnorr (no taproot) round-trip -----
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32.signSchnorr verifies under derived x-only pub',
-      () => {
-        // m/86'/0'/0'/0/0 untweaked pub is bip86InternalXOnly (the 32-byte x)
-        // We can also derive it from the seed by stripping the 33-byte
-        // compressed pub returned by getPublicKey.
-        secureKV.bip32.setSeed(k('bip86'), bip86Seed);
-        const compressed = secureKV.bip32.getPublicKey(
+      async () => {
+        await secureKV.bip32.setSeed(k('bip86'), bip86Seed);
+        const compressed = await secureKV.bip32.getPublicKey(
           k('bip86'),
           bip86Path,
           'secp256k1'
@@ -1376,16 +1431,12 @@ function secureKVSignTests(): TestResult[] {
         if (toHex(xOnly) !== bip86InternalXOnly) {
           return `derived x-only mismatch: ${toHex(xOnly)}`;
         }
-        const sig = secureKV.bip32.signSchnorr(
+        const sig = await secureKV.bip32.signSchnorr(
           k('bip86'),
           bip86Path,
           digest,
           new Uint8Array(32) // zero aux for determinism
         );
-        // BIP-340 sign internally adjusts the signing scalar to match
-        // even-y; verification should succeed against the x-only pub.
-        // For a y-odd untweaked pub, the algorithm flips the scalar before
-        // signing and the resulting sig still verifies against x-only.
         return (
           schnorr.verify(fromHex(bip86InternalXOnly), sig, digest) ||
           'schnorr sig did not verify'
@@ -1396,10 +1447,10 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- BIP-86 Taproot key-spend -----
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32.signSchnorrTaproot verifies under tweaked pub (BIP-86)',
-      () => {
-        const sig = secureKV.bip32.signSchnorrTaproot(
+      async () => {
+        const sig = await secureKV.bip32.signSchnorrTaproot(
           k('bip86'),
           bip86Path,
           digest
@@ -1414,16 +1465,18 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- BIP-32 ed25519 (SLIP-10) -----
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32.signEd25519 verifies under derived ed25519 pub',
-      () => {
-        // SLIP-10 ed25519: hardened only.
+      async () => {
         const path = "m/44'/60'/0'";
-        const pub = secureKV.bip32.getPublicKey(k('vec1'), path, 'ed25519');
-        // ed25519 pubkey is 32 bytes (no 0x00 tag in our API).
+        const pub = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          path,
+          'ed25519'
+        );
         if (pub.length !== 32) return `pub length ${pub.length}`;
         const msg = ascii('hello ed25519');
-        const sig = secureKV.bip32.signEd25519(k('vec1'), path, msg);
+        const sig = await secureKV.bip32.signEd25519(k('vec1'), path, msg);
         return ed25519.verify(pub, sig, msg) || 'ed25519 sig did not verify';
       }
     )
@@ -1431,44 +1484,47 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- ECDH via secureKV -----
   results.push(
-    check('secureKV.bip32.ecdh matches standalone ecdsa.ecdh', () => {
-      const counterPriv = ecdsa.randomPrivate('secp256k1');
-      const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
-      const sharedFromKV = secureKV.bip32.ecdh(
-        k('vec1'),
-        bip32LeafPath,
-        counterPub,
-        'secp256k1'
-      );
-      const sharedFromRef = ecdsa.ecdh(
-        fromHex(bip32LeafPriv),
-        counterPub,
-        'secp256k1'
-      );
-      return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
-    })
+    await checkAsync(
+      'secureKV.bip32.ecdh matches standalone ecdsa.ecdh',
+      async () => {
+        const counterPriv = ecdsa.randomPrivate('secp256k1');
+        const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
+        const sharedFromKV = await secureKV.bip32.ecdh(
+          k('vec1'),
+          bip32LeafPath,
+          counterPub,
+          'secp256k1'
+        );
+        const sharedFromRef = ecdsa.ecdh(
+          fromHex(bip32LeafPriv),
+          counterPub,
+          'secp256k1'
+        );
+        return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
+      }
+    )
   );
 
   // ----- raw secp256k1 -----
   results.push(
-    check('secureKV.raw.signEcdsa secp256k1 verifies', () => {
+    await checkAsync('secureKV.raw.signEcdsa secp256k1 verifies', async () => {
       const priv = ecdsa.randomPrivate('secp256k1');
       const pub = ecdsa.getPublic(priv, true, 'secp256k1');
-      secureKV.raw.setPrivate(k('rawk1'), priv, 'secp256k1');
-      const got = secureKV.raw.getPublicKey(k('rawk1'));
+      await secureKV.raw.setPrivate(k('rawk1'), priv, 'secp256k1');
+      const got = await secureKV.raw.getPublicKey(k('rawk1'));
       if (!eq(got, pub)) return `pub mismatch: ${toHex(got)}`;
-      const sig = secureKV.raw.signEcdsa(k('rawk1'), digest);
+      const sig = await secureKV.raw.signEcdsa(k('rawk1'), digest);
       return ecdsa.verify(pub, sig.signature, digest) || 'sig did not verify';
     })
   );
 
   // ----- raw nist256p1 -----
   results.push(
-    check('secureKV.raw.signEcdsa nist256p1 verifies', () => {
+    await checkAsync('secureKV.raw.signEcdsa nist256p1 verifies', async () => {
       const priv = ecdsa.randomPrivate('nist256p1');
       const pub = ecdsa.getPublic(priv, true, 'nist256p1');
-      secureKV.raw.setPrivate(k('rawn'), priv, 'nist256p1');
-      const sig = secureKV.raw.signEcdsa(k('rawn'), digest);
+      await secureKV.raw.setPrivate(k('rawn'), priv, 'nist256p1');
+      const sig = await secureKV.raw.signEcdsa(k('rawn'), digest);
       return (
         ecdsa.verify(pub, sig.signature, digest, 'nist256p1') ||
         'sig did not verify'
@@ -1478,214 +1534,265 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- raw ed25519 -----
   results.push(
-    check('secureKV.raw.signEd25519 verifies', () => {
+    await checkAsync('secureKV.raw.signEd25519 verifies', async () => {
       const seed = rng.bytes(32);
       const pub = ed25519.getPublic(seed);
-      secureKV.raw.setPrivate(k('rawed'), seed, 'ed25519');
-      const got = secureKV.raw.getPublicKey(k('rawed'));
+      await secureKV.raw.setPrivate(k('rawed'), seed, 'ed25519');
+      const got = await secureKV.raw.getPublicKey(k('rawed'));
       if (!eq(got, pub)) return `pub mismatch`;
       const msg = ascii('raw ed25519 round-trip');
-      const sig = secureKV.raw.signEd25519(k('rawed'), msg);
+      const sig = await secureKV.raw.signEd25519(k('rawed'), msg);
       return ed25519.verify(pub, sig, msg) || 'sig did not verify';
     })
   );
 
   // ----- raw Taproot key-spend -----
   results.push(
-    check('secureKV.raw.signSchnorrTaproot verifies under tweaked pub', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      const pubCompressed = ecdsa.getPublic(priv, true, 'secp256k1');
-      const xOnly = pubCompressed.slice(1, 33);
-      const tweaked = schnorr.tweakPublic(xOnly).pub;
-      secureKV.raw.setPrivate(k('rawtap'), priv, 'secp256k1');
-      const sig = secureKV.raw.signSchnorrTaproot(k('rawtap'), digest);
-      return (
-        schnorr.verify(tweaked, sig, digest) || 'taproot sig did not verify'
-      );
-    })
+    await checkAsync(
+      'secureKV.raw.signSchnorrTaproot verifies under tweaked pub',
+      async () => {
+        const priv = ecdsa.randomPrivate('secp256k1');
+        const pubCompressed = ecdsa.getPublic(priv, true, 'secp256k1');
+        const xOnly = pubCompressed.slice(1, 33);
+        const tweaked = schnorr.tweakPublic(xOnly).pub;
+        await secureKV.raw.setPrivate(k('rawtap'), priv, 'secp256k1');
+        const sig = await secureKV.raw.signSchnorrTaproot(k('rawtap'), digest);
+        return (
+          schnorr.verify(tweaked, sig, digest) || 'taproot sig did not verify'
+        );
+      }
+    )
   );
 
   // ----- cross-slot mismatches -----
   results.push(
-    throws('secureKV.bip32 op on a generic blob slot throws', () => {
-      secureKV.set(k('blob'), ascii('x'));
-      secureKV.bip32.getPublicKey(k('blob'), 'm', 'secp256k1');
+    await throwsAsync(
+      'secureKV.bip32 op on a generic blob slot throws',
+      async () => {
+        await secureKV.set(k('blob'), ascii('x'));
+        await secureKV.bip32.getPublicKey(k('blob'), 'm', 'secp256k1');
+      }
+    )
+  );
+
+  results.push(
+    await throwsAsync('secureKV.get on a SEED slot throws', async () => {
+      await secureKV.bip32.setSeed(k('seedslot'), bip86Seed);
+      await secureKV.get(k('seedslot'));
     })
   );
 
   results.push(
-    throws('secureKV.get on a SEED slot throws', () => {
-      secureKV.bip32.setSeed(k('seedslot'), bip86Seed);
-      secureKV.get(k('seedslot'));
+    await throwsAsync('secureKV.raw op on a SEED slot throws', async () => {
+      await secureKV.bip32.setSeed(k('seedslot2'), bip86Seed);
+      await secureKV.raw.signEcdsa(k('seedslot2'), digest);
     })
   );
 
   results.push(
-    throws('secureKV.raw op on a SEED slot throws', () => {
-      secureKV.bip32.setSeed(k('seedslot2'), bip86Seed);
-      secureKV.raw.signEcdsa(k('seedslot2'), digest);
-    })
+    await throwsAsync(
+      'secureKV.raw.signEd25519 on secp256k1 slot throws',
+      async () => {
+        const priv = ecdsa.randomPrivate('secp256k1');
+        await secureKV.raw.setPrivate(k('rawk1b'), priv, 'secp256k1');
+        await secureKV.raw.signEd25519(k('rawk1b'), ascii('x'));
+      }
+    )
   );
 
   results.push(
-    throws('secureKV.raw.signEd25519 on secp256k1 slot throws', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      secureKV.raw.setPrivate(k('rawk1b'), priv, 'secp256k1');
-      secureKV.raw.signEd25519(k('rawk1b'), ascii('x'));
-    })
-  );
-
-  results.push(
-    throws('secureKV.raw.signSchnorr on ed25519 slot throws', () => {
-      secureKV.raw.setPrivate(k('rawedb'), rng.bytes(32), 'ed25519');
-      secureKV.raw.signSchnorr(k('rawedb'), digest);
-    })
+    await throwsAsync(
+      'secureKV.raw.signSchnorr on ed25519 slot throws',
+      async () => {
+        await secureKV.raw.setPrivate(k('rawedb'), rng.bytes(32), 'ed25519');
+        await secureKV.raw.signSchnorr(k('rawedb'), digest);
+      }
+    )
   );
 
   // ----- size / format validation -----
   results.push(
-    throws('secureKV.bip32.setSeed below 16 bytes throws', () => {
-      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(8));
+    await throwsAsync(
+      'secureKV.bip32.setSeed below 16 bytes throws',
+      async () => {
+        await secureKV.bip32.setSeed(k('badseed'), new Uint8Array(8));
+      }
+    )
+  );
+
+  results.push(
+    await throwsAsync(
+      'secureKV.bip32.setSeed above 64 bytes throws',
+      async () => {
+        await secureKV.bip32.setSeed(k('badseed'), new Uint8Array(65));
+      }
+    )
+  );
+
+  results.push(
+    await throwsAsync('secureKV.raw.setPrivate wrong size throws', async () => {
+      await secureKV.raw.setPrivate(
+        k('badpriv'),
+        new Uint8Array(31),
+        'secp256k1'
+      );
     })
   );
 
   results.push(
-    throws('secureKV.bip32.setSeed above 64 bytes throws', () => {
-      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(65));
-    })
-  );
-
-  results.push(
-    throws('secureKV.raw.setPrivate wrong size throws', () => {
-      secureKV.raw.setPrivate(k('badpriv'), new Uint8Array(31), 'secp256k1');
-    })
-  );
-
-  results.push(
-    throws('secureKV.bip32.signEcdsa missing slot throws', () => {
-      secureKV.bip32.signEcdsa(k('nope'), 'm', digest, 'secp256k1');
-    })
+    await throwsAsync(
+      'secureKV.bip32.signEcdsa missing slot throws',
+      async () => {
+        await secureKV.bip32.signEcdsa(k('nope'), 'm', digest, 'secp256k1');
+      }
+    )
   );
 
   // ----- bip32 nist256p1 derivation + sign -----
   results.push(
-    check('secureKV.bip32 nist256p1 matches standalone bip32+ecdsa', () => {
-      const path = "m/0'/1";
-      const root = bip32.fromSeed(bip32Seed, 'nist256p1');
-      const node = bip32.derive(root, path);
-      const refPub = ecdsa.getPublic(node.privateKey!, true, 'nist256p1');
-      const kvPub = secureKV.bip32.getPublicKey(k('vec1'), path, 'nist256p1');
-      if (!eq(kvPub, refPub)) return `pub mismatch: ${toHex(kvPub)}`;
-      const sig = secureKV.bip32.signEcdsa(
-        k('vec1'),
-        path,
-        digest,
-        'nist256p1'
-      );
-      return (
-        ecdsa.verify(refPub, sig.signature, digest, 'nist256p1') ||
-        'sig did not verify under derived nist256p1 pub'
-      );
-    })
+    await checkAsync(
+      'secureKV.bip32 nist256p1 matches standalone bip32+ecdsa',
+      async () => {
+        const path = "m/0'/1";
+        const root = bip32.fromSeed(bip32Seed, 'nist256p1');
+        const node = bip32.derive(root, path);
+        const refPub = ecdsa.getPublic(node.privateKey!, true, 'nist256p1');
+        const kvPub = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          path,
+          'nist256p1'
+        );
+        if (!eq(kvPub, refPub)) return `pub mismatch: ${toHex(kvPub)}`;
+        const sig = await secureKV.bip32.signEcdsa(
+          k('vec1'),
+          path,
+          digest,
+          'nist256p1'
+        );
+        return (
+          ecdsa.verify(refPub, sig.signature, digest, 'nist256p1') ||
+          'sig did not verify under derived nist256p1 pub'
+        );
+      }
+    )
   );
 
   // ----- uncompressed public keys -----
   results.push(
-    check('secureKV.bip32.getPublicKey compact=false returns 65 bytes', () => {
-      const uncompressed = secureKV.bip32.getPublicKey(
-        k('vec1'),
-        bip32LeafPath,
-        'secp256k1',
-        false
-      );
-      if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
-      if (uncompressed[0] !== 0x04) return `prefix=${uncompressed[0]}`;
-      // Recompressing must match the compressed pub from the same slot.
-      const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
-      return (
-        toHex(recompressed) === bip32LeafPubCompressed ||
-        `recompressed=${toHex(recompressed)}`
-      );
-    })
+    await checkAsync(
+      'secureKV.bip32.getPublicKey compact=false returns 65 bytes',
+      async () => {
+        const uncompressed = await secureKV.bip32.getPublicKey(
+          k('vec1'),
+          bip32LeafPath,
+          'secp256k1',
+          false
+        );
+        if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
+        if (uncompressed[0] !== 0x04) return `prefix=${uncompressed[0]}`;
+        const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
+        return (
+          toHex(recompressed) === bip32LeafPubCompressed ||
+          `recompressed=${toHex(recompressed)}`
+        );
+      }
+    )
   );
 
   results.push(
-    check('secureKV.raw.getPublicKey compact=false returns 65 bytes', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      secureKV.raw.setPrivate(k('rawunc'), priv, 'secp256k1');
-      const compact = secureKV.raw.getPublicKey(k('rawunc'));
-      const uncompressed = secureKV.raw.getPublicKey(k('rawunc'), false);
-      if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
-      const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
-      return eq(recompressed, compact) || 'compact vs uncompressed mismatch';
-    })
+    await checkAsync(
+      'secureKV.raw.getPublicKey compact=false returns 65 bytes',
+      async () => {
+        const priv = ecdsa.randomPrivate('secp256k1');
+        await secureKV.raw.setPrivate(k('rawunc'), priv, 'secp256k1');
+        const compact = await secureKV.raw.getPublicKey(k('rawunc'));
+        const uncompressed = await secureKV.raw.getPublicKey(
+          k('rawunc'),
+          false
+        );
+        if (uncompressed.length !== 65) return `length=${uncompressed.length}`;
+        const recompressed = ecdsa.readPublic(uncompressed, true, 'secp256k1');
+        return eq(recompressed, compact) || 'compact vs uncompressed mismatch';
+      }
+    )
   );
 
   // ----- raw Schnorr (BIP-340, no taproot tweak) -----
   results.push(
-    check('secureKV.raw.signSchnorr verifies under x-only pub', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      const xOnly = ecdsa.getPublic(priv, true, 'secp256k1').slice(1, 33);
-      secureKV.raw.setPrivate(k('rawschnorr'), priv, 'secp256k1');
-      const sig = secureKV.raw.signSchnorr(
-        k('rawschnorr'),
-        digest,
-        new Uint8Array(32)
-      );
-      return schnorr.verify(xOnly, sig, digest) || 'schnorr sig did not verify';
-    })
+    await checkAsync(
+      'secureKV.raw.signSchnorr verifies under x-only pub',
+      async () => {
+        const priv = ecdsa.randomPrivate('secp256k1');
+        const xOnly = ecdsa.getPublic(priv, true, 'secp256k1').slice(1, 33);
+        await secureKV.raw.setPrivate(k('rawschnorr'), priv, 'secp256k1');
+        const sig = await secureKV.raw.signSchnorr(
+          k('rawschnorr'),
+          digest,
+          new Uint8Array(32)
+        );
+        return (
+          schnorr.verify(xOnly, sig, digest) || 'schnorr sig did not verify'
+        );
+      }
+    )
   );
 
   // ----- raw ECDH -----
   results.push(
-    check('secureKV.raw.ecdh matches standalone ecdsa.ecdh', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      const counterPriv = ecdsa.randomPrivate('secp256k1');
-      const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
-      secureKV.raw.setPrivate(k('rawecdh'), priv, 'secp256k1');
-      const sharedFromKV = secureKV.raw.ecdh(k('rawecdh'), counterPub);
-      const sharedFromRef = ecdsa.ecdh(priv, counterPub, 'secp256k1');
-      return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
-    })
+    await checkAsync(
+      'secureKV.raw.ecdh matches standalone ecdsa.ecdh',
+      async () => {
+        const priv = ecdsa.randomPrivate('secp256k1');
+        const counterPriv = ecdsa.randomPrivate('secp256k1');
+        const counterPub = ecdsa.getPublic(counterPriv, true, 'secp256k1');
+        await secureKV.raw.setPrivate(k('rawecdh'), priv, 'secp256k1');
+        const sharedFromKV = await secureKV.raw.ecdh(k('rawecdh'), counterPub);
+        const sharedFromRef = ecdsa.ecdh(priv, counterPub, 'secp256k1');
+        return eq(sharedFromKV, sharedFromRef) || 'ecdh mismatch';
+      }
+    )
   );
 
   // ----- non-zero aux randomness exercises the optional-arg path -----
   results.push(
-    check('secureKV.bip32.signSchnorr non-zero aux verifies', () => {
-      const aux = rng.bytes(32);
-      const compressed = secureKV.bip32.getPublicKey(
-        k('bip86'),
-        bip86Path,
-        'secp256k1'
-      );
-      const xOnly = compressed.slice(1, 33);
-      const sig = secureKV.bip32.signSchnorr(
-        k('bip86'),
-        bip86Path,
-        digest,
-        aux
-      );
-      return (
-        schnorr.verify(xOnly, sig, digest) ||
-        'schnorr sig with aux did not verify'
-      );
-    })
+    await checkAsync(
+      'secureKV.bip32.signSchnorr non-zero aux verifies',
+      async () => {
+        const aux = rng.bytes(32);
+        const compressed = await secureKV.bip32.getPublicKey(
+          k('bip86'),
+          bip86Path,
+          'secp256k1'
+        );
+        const xOnly = compressed.slice(1, 33);
+        const sig = await secureKV.bip32.signSchnorr(
+          k('bip86'),
+          bip86Path,
+          digest,
+          aux
+        );
+        return (
+          schnorr.verify(xOnly, sig, digest) ||
+          'schnorr sig with aux did not verify'
+        );
+      }
+    )
   );
 
   // ----- taproot with a merkle root (script-path commitment) -----
   results.push(
-    check(
+    await checkAsync(
       'secureKV.bip32.signSchnorrTaproot with merkleRoot verifies under tweaked pub',
-      () => {
+      async () => {
         const merkleRoot = hash.sha256(ascii('dummy script tree root'));
-        const compressed = secureKV.bip32.getPublicKey(
+        const compressed = await secureKV.bip32.getPublicKey(
           k('bip86'),
           bip86Path,
           'secp256k1'
         );
         const xOnly = compressed.slice(1, 33);
         const tweaked = schnorr.tweakPublic(xOnly, merkleRoot).pub;
-        const sig = secureKV.bip32.signSchnorrTaproot(
+        const sig = await secureKV.bip32.signSchnorrTaproot(
           k('bip86'),
           bip86Path,
           digest,
@@ -1701,48 +1808,58 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- scalar validation on raw secp256k1 slot -----
   results.push(
-    throws('secureKV.raw.setPrivate zero scalar rejected (secp256k1)', () => {
-      secureKV.raw.setPrivate(k('zero'), new Uint8Array(32), 'secp256k1');
-    })
+    await throwsAsync(
+      'secureKV.raw.setPrivate zero scalar rejected (secp256k1)',
+      async () => {
+        await secureKV.raw.setPrivate(
+          k('zero'),
+          new Uint8Array(32),
+          'secp256k1'
+        );
+      }
+    )
   );
 
   results.push(
-    throws(
+    await throwsAsync(
       'secureKV.raw.setPrivate out-of-range scalar rejected (secp256k1)',
-      () => {
+      async () => {
         const all0xff = new Uint8Array(32).fill(0xff);
-        secureKV.raw.setPrivate(k('toobig'), all0xff, 'secp256k1');
+        await secureKV.raw.setPrivate(k('toobig'), all0xff, 'secp256k1');
       }
     )
   );
 
   // ----- remaining cross-slot mismatches -----
   results.push(
-    throws('secureKV.raw op on a generic blob slot throws', () => {
-      secureKV.set(k('blob2'), ascii('x'));
-      secureKV.raw.signEcdsa(k('blob2'), digest);
+    await throwsAsync(
+      'secureKV.raw op on a generic blob slot throws',
+      async () => {
+        await secureKV.set(k('blob2'), ascii('x'));
+        await secureKV.raw.signEcdsa(k('blob2'), digest);
+      }
+    )
+  );
+
+  results.push(
+    await throwsAsync('secureKV.bip32 op on a RAW slot throws', async () => {
+      const priv = ecdsa.randomPrivate('secp256k1');
+      await secureKV.raw.setPrivate(k('rawXbip'), priv, 'secp256k1');
+      await secureKV.bip32.getPublicKey(k('rawXbip'), 'm', 'secp256k1');
     })
   );
 
   results.push(
-    throws('secureKV.bip32 op on a RAW slot throws', () => {
+    await throwsAsync('secureKV.get on a RAW slot throws', async () => {
       const priv = ecdsa.randomPrivate('secp256k1');
-      secureKV.raw.setPrivate(k('rawXbip'), priv, 'secp256k1');
-      secureKV.bip32.getPublicKey(k('rawXbip'), 'm', 'secp256k1');
-    })
-  );
-
-  results.push(
-    throws('secureKV.get on a RAW slot throws', () => {
-      const priv = ecdsa.randomPrivate('secp256k1');
-      secureKV.raw.setPrivate(k('rawXget'), priv, 'secp256k1');
-      secureKV.get(k('rawXget'));
+      await secureKV.raw.setPrivate(k('rawXget'), priv, 'secp256k1');
+      await secureKV.get(k('rawXget'));
     })
   );
 
   // Final cleanup.
   try {
-    secureKV.clear();
+    await secureKV.clear();
   } catch {
     // ignore
   }
@@ -1750,7 +1867,7 @@ function secureKVSignTests(): TestResult[] {
   return results;
 }
 
-export function runAllTests(): TestResult[] {
+export async function runAllTests(): Promise<TestResult[]> {
   return [
     ...hashTests(),
     ...macTests(),
@@ -1764,7 +1881,7 @@ export function runAllTests(): TestResult[] {
     ...eccTests(),
     ...webcryptoTests(),
     ...slip39Tests(),
-    ...secureKVTests(),
-    ...secureKVSignTests(),
+    ...(await secureKVTests()),
+    ...(await secureKVSignTests()),
   ];
 }

@@ -250,13 +250,13 @@ export interface RawSpec {
    * reset) surface as CryptoError with reason "unavailable" — the JS
    * wrapper upgrades those to SecureKVUnavailableError.
    */
-  secure_kv_set(key: string, value: ArrayBuffer): void;
-  secure_kv_get(key: string): ArrayBuffer | null;
-  secure_kv_has(key: string): boolean;
-  secure_kv_delete(key: string): void;
-  secure_kv_list(): string[];
-  secure_kv_clear(): void;
-  secure_kv_is_hardware_backed(): boolean;
+  secure_kv_set(key: string, value: ArrayBuffer): Promise<void>;
+  secure_kv_get(key: string): Promise<ArrayBuffer | null>;
+  secure_kv_has(key: string): Promise<boolean>;
+  secure_kv_delete(key: string): Promise<void>;
+  secure_kv_list(): Promise<string[]>;
+  secure_kv_clear(): Promise<void>;
+  secure_kv_is_hardware_backed(): Promise<boolean>;
 
   /**
    * Native-only signing on top of secureKV slots.
@@ -279,67 +279,73 @@ export interface RawSpec {
    * `secure_kv_bip32_sign_ecdsa` and `secure_kv_raw_sign_ecdsa` return
    * 65 bytes laid out as `[recId, sig[0..64]]`, matching `ecdsa_sign`.
    */
-  secure_kv_bip32_set_seed(key: string, seed: ArrayBuffer): void;
+  secure_kv_bip32_set_seed(key: string, seed: ArrayBuffer): Promise<void>;
   secure_kv_bip32_fingerprint(
     key: string,
     path: ArrayBuffer,
     curve: string
-  ): number;
+  ): Promise<number>;
   secure_kv_bip32_get_public(
     key: string,
     path: ArrayBuffer,
     curve: string,
     compact: boolean
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ecdsa(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
     curve: string
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
     aux: ArrayBuffer | null
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr_taproot(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
     merkleRoot: ArrayBuffer | null
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ed25519(
     key: string,
     path: ArrayBuffer,
     msg: ArrayBuffer
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_bip32_ecdh(
     key: string,
     path: ArrayBuffer,
     peerPub: ArrayBuffer,
     curve: string
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
 
   secure_kv_raw_set_private(
     key: string,
     priv: ArrayBuffer,
     curve: string
-  ): void;
-  secure_kv_raw_get_public(key: string, compact: boolean): ArrayBuffer;
-  secure_kv_raw_sign_ecdsa(key: string, digest: ArrayBuffer): ArrayBuffer;
+  ): Promise<void>;
+  secure_kv_raw_get_public(key: string, compact: boolean): Promise<ArrayBuffer>;
+  secure_kv_raw_sign_ecdsa(
+    key: string,
+    digest: ArrayBuffer
+  ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr(
     key: string,
     digest: ArrayBuffer,
     aux: ArrayBuffer | null
-  ): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr_taproot(
     key: string,
     digest: ArrayBuffer,
     merkleRoot: ArrayBuffer | null
-  ): ArrayBuffer;
-  secure_kv_raw_sign_ed25519(key: string, msg: ArrayBuffer): ArrayBuffer;
-  secure_kv_raw_ecdh(key: string, peerPub: ArrayBuffer): ArrayBuffer;
+  ): Promise<ArrayBuffer>;
+  secure_kv_raw_sign_ed25519(
+    key: string,
+    msg: ArrayBuffer
+  ): Promise<ArrayBuffer>;
+  secure_kv_raw_ecdh(key: string, peerPub: ArrayBuffer): Promise<ArrayBuffer>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('ReactNativeCryptoLib');

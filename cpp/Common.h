@@ -3,6 +3,7 @@
 #include <ReactNativeCryptoLibSpecJSI.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -142,6 +143,44 @@ inline std::string requireStringAt(
       rt, std::string(methodName) + ": " + argName + " must be a string");
   }
   return args[index].getString(rt).utf8(rt);
+}
+
+// Wraps a synchronous unit of work in a JS Promise. The executor runs
+// synchronously while the Promise is being constructed, so any
+// validation throws inside `work` surface as Promise rejections at the
+// same JS microtask boundary — callers only ever see async errors.
+//
+// Used by secureKV (the only domain whose API is async) so the API
+// shape can layer in real off-thread dispatch / biometric prompts later
+// without breaking call sites. The pure-CPU domains stay sync.
+inline jsi::Value makePromise(
+  jsi::Runtime& rt, std::function<jsi::Value(jsi::Runtime&)> work
+) {
+  auto executor = jsi::Function::createFromHostFunction(
+    rt,
+    jsi::PropNameID::forAscii(rt, "promiseExecutor"),
+    2,
+    [work = std::move(work)](
+      jsi::Runtime& rt,
+      const jsi::Value&,
+      const jsi::Value* execArgs,
+      size_t
+    ) -> jsi::Value {
+      auto resolve = execArgs[0].asObject(rt).asFunction(rt);
+      auto reject = execArgs[1].asObject(rt).asFunction(rt);
+      try {
+        resolve.call(rt, work(rt));
+      } catch (const jsi::JSError& e) {
+        reject.call(rt, e.value());
+      } catch (const std::exception& e) {
+        reject.call(rt, jsi::JSError(rt, e.what()).value());
+      }
+      return jsi::Value::undefined();
+    }
+  );
+  return rt.global()
+    .getPropertyAsFunction(rt, "Promise")
+    .callAsConstructor(rt, std::move(executor));
 }
 
 // Each domain module (Hash, Mac, Kdf, Rng, Ecdsa, Schnorr) exposes one of

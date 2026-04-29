@@ -18,6 +18,11 @@
 // big-endian uint32 indices (4 * N bytes for an N-step path). The TS
 // wrapper layer converts the conventional "m/44'/0'/0'/0/0" string form
 // into this packed buffer.
+//
+// The public API of this module is async (Promise-returning); each
+// public `invoke_*` thunk wraps its sync body in `makePromise` so call
+// sites can `await` and so a future biometric-prompt path can layer in
+// without breaking the API surface.
 
 #include "Common.h"
 #include "SchnorrInternal.h"
@@ -236,10 +241,10 @@ void deriveFromSeed(
   memzero(&node, sizeof(node));
 }
 
-// --- BIP-32: setSeed -------------------------------------------------------
+// --- Sync bodies (called from inside makePromise lambdas) ------------------
 
-jsi::Value invoke_bip32_set_seed(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_set_seed_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   std::string alias = requireStringAt(
     rt, "secure_kv_bip32_set_seed", "key", args, count, 0);
@@ -263,10 +268,8 @@ jsi::Value invoke_bip32_set_seed(
   return jsi::Value::undefined();
 }
 
-// --- BIP-32: fingerprint ---------------------------------------------------
-
-jsi::Value invoke_bip32_fingerprint(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_fingerprint_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_bip32_fingerprint";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -294,10 +297,8 @@ jsi::Value invoke_bip32_fingerprint(
   return jsi::Value(static_cast<double>(fp));
 }
 
-// --- BIP-32: getPublicKey --------------------------------------------------
-
-jsi::Value invoke_bip32_get_public(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_get_public_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_bip32_get_public";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -324,14 +325,10 @@ jsi::Value invoke_bip32_get_public(
 
   std::vector<uint8_t> out;
   if (curveTag == kCurveTagEd25519) {
-    // SLIP-10 ed25519 nodes carry public_key as 0x00 || ed25519_pub(32B).
-    // For the compressed view we strip the leading 0x00; "uncompressed" is
-    // not meaningful for Edwards curves so we always return 32 bytes.
     out.assign(k.pub + 1, k.pub + 33);
   } else if (compact) {
     out.assign(k.pub, k.pub + 33);
   } else {
-    // Re-expand to 65 bytes via ecdsa_read_pubkey + bn_write_be.
     const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
     curve_point point = {};
     if (ecdsa_read_pubkey(curve, k.pub, &point) == 0) {
@@ -350,10 +347,8 @@ jsi::Value invoke_bip32_get_public(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- BIP-32: signEcdsa -----------------------------------------------------
-
-jsi::Value invoke_bip32_sign_ecdsa(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_sign_ecdsa_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_bip32_sign_ecdsa";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -396,9 +391,7 @@ jsi::Value invoke_bip32_sign_ecdsa(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- BIP-32: signSchnorr / signSchnorrTaproot ------------------------------
-
-jsi::Value invoke_bip32_sign_schnorr_impl(
+jsi::Value bip32_sign_schnorr_impl(
   jsi::Runtime& rt,
   const jsi::Value* args,
   size_t count,
@@ -465,24 +458,8 @@ jsi::Value invoke_bip32_sign_schnorr_impl(
   return wrapDigest(rt, std::move(out));
 }
 
-jsi::Value invoke_bip32_sign_schnorr(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return invoke_bip32_sign_schnorr_impl(
-    rt, args, count, "secure_kv_bip32_sign_schnorr", /*taproot*/ false);
-}
-
-jsi::Value invoke_bip32_sign_schnorr_taproot(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return invoke_bip32_sign_schnorr_impl(
-    rt, args, count, "secure_kv_bip32_sign_schnorr_taproot", /*taproot*/ true);
-}
-
-// --- BIP-32: signEd25519 ---------------------------------------------------
-
-jsi::Value invoke_bip32_sign_ed25519(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_sign_ed25519_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_bip32_sign_ed25519";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -509,10 +486,8 @@ jsi::Value invoke_bip32_sign_ed25519(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- BIP-32: ecdh ----------------------------------------------------------
-
-jsi::Value invoke_bip32_ecdh(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value bip32_ecdh_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_bip32_ecdh";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -557,10 +532,8 @@ jsi::Value invoke_bip32_ecdh(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- RAW: setPrivate -------------------------------------------------------
-
-jsi::Value invoke_raw_set_private(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value raw_set_private_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_raw_set_private";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -633,10 +606,8 @@ void loadRawKey(
   }
 }
 
-// --- RAW: getPublicKey -----------------------------------------------------
-
-jsi::Value invoke_raw_get_public(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value raw_get_public_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_raw_get_public";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -665,10 +636,8 @@ jsi::Value invoke_raw_get_public(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- RAW: signEcdsa --------------------------------------------------------
-
-jsi::Value invoke_raw_sign_ecdsa(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value raw_sign_ecdsa_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_raw_sign_ecdsa";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -701,9 +670,7 @@ jsi::Value invoke_raw_sign_ecdsa(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- RAW: signSchnorr / signSchnorrTaproot ---------------------------------
-
-jsi::Value invoke_raw_sign_schnorr_impl(
+jsi::Value raw_sign_schnorr_impl(
   jsi::Runtime& rt,
   const jsi::Value* args,
   size_t count,
@@ -757,24 +724,8 @@ jsi::Value invoke_raw_sign_schnorr_impl(
   return wrapDigest(rt, std::move(out));
 }
 
-jsi::Value invoke_raw_sign_schnorr(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return invoke_raw_sign_schnorr_impl(
-    rt, args, count, "secure_kv_raw_sign_schnorr", /*taproot*/ false);
-}
-
-jsi::Value invoke_raw_sign_schnorr_taproot(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return invoke_raw_sign_schnorr_impl(
-    rt, args, count, "secure_kv_raw_sign_schnorr_taproot", /*taproot*/ true);
-}
-
-// --- RAW: signEd25519 ------------------------------------------------------
-
-jsi::Value invoke_raw_sign_ed25519(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value raw_sign_ed25519_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_raw_sign_ed25519";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -790,10 +741,8 @@ jsi::Value invoke_raw_sign_ed25519(
   return wrapDigest(rt, std::move(out));
 }
 
-// --- RAW: ecdh -------------------------------------------------------------
-
-jsi::Value invoke_raw_ecdh(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+jsi::Value raw_ecdh_sync(
+  jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
   const char* op = "secure_kv_raw_ecdh";
   std::string alias = requireStringAt(rt, op, "key", args, count, 0);
@@ -826,6 +775,132 @@ jsi::Value invoke_raw_ecdh(
   std::memcpy(out.data() + 1, full + 1, 32);
   memzero(full, sizeof(full));
   return wrapDigest(rt, std::move(out));
+}
+
+// --- Promise-wrapped public thunks -----------------------------------------
+
+jsi::Value invoke_bip32_set_seed(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_set_seed_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_bip32_fingerprint(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_fingerprint_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_bip32_get_public(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_get_public_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_bip32_sign_ecdsa(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_sign_ecdsa_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_bip32_sign_schnorr(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_sign_schnorr_impl(
+      rt, args, count, "secure_kv_bip32_sign_schnorr", /*taproot*/ false);
+  });
+}
+
+jsi::Value invoke_bip32_sign_schnorr_taproot(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_sign_schnorr_impl(
+      rt, args, count, "secure_kv_bip32_sign_schnorr_taproot", /*taproot*/ true);
+  });
+}
+
+jsi::Value invoke_bip32_sign_ed25519(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_sign_ed25519_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_bip32_ecdh(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return bip32_ecdh_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_raw_set_private(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_set_private_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_raw_get_public(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_get_public_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_raw_sign_ecdsa(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_sign_ecdsa_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_raw_sign_schnorr(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_sign_schnorr_impl(
+      rt, args, count, "secure_kv_raw_sign_schnorr", /*taproot*/ false);
+  });
+}
+
+jsi::Value invoke_raw_sign_schnorr_taproot(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_sign_schnorr_impl(
+      rt, args, count, "secure_kv_raw_sign_schnorr_taproot", /*taproot*/ true);
+  });
+}
+
+jsi::Value invoke_raw_sign_ed25519(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_sign_ed25519_sync(rt, args, count);
+  });
+}
+
+jsi::Value invoke_raw_ecdh(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    return raw_ecdh_sync(rt, args, count);
+  });
 }
 
 }  // namespace

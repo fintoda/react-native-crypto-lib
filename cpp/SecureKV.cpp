@@ -44,117 +44,128 @@ void requireValidKey(jsi::Runtime& rt, const char* op, const std::string& key) {
 jsi::Value invoke_set(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  std::string key = requireStringAt(rt, "secure_kv_set", "key", args, count, 0);
-  requireValidKey(rt, "secure_kv_set", key);
-  auto value = requireArrayBufferAt(rt, "secure_kv_set", "value", args, count, 1);
-  size_t len = value.size(rt);
-  if (len > kMaxValueLen) {
-    throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
-  }
-  // Wrap user bytes in a Blob (0x00) slot so that the typed sign-side
-  // APIs can reject mismatches at parse time rather than mis-interpret
-  // a raw blob as a seed / private key.
-  auto wrapped = wrapBlobSlot(safeData(rt, value), len);
-  try {
-    SecureKVBackend::set(key, wrapped.data(), wrapped.size());
-  } catch (const std::exception& e) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    std::string key = requireStringAt(rt, "secure_kv_set", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_set", key);
+    auto value = requireArrayBufferAt(rt, "secure_kv_set", "value", args, count, 1);
+    size_t len = value.size(rt);
+    if (len > kMaxValueLen) {
+      throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
+    }
+    auto wrapped = wrapBlobSlot(safeData(rt, value), len);
+    try {
+      SecureKVBackend::set(key, wrapped.data(), wrapped.size());
+    } catch (const std::exception& e) {
+      memzero(wrapped.data(), wrapped.size());
+      wrap(rt, "secure_kv_set", e);
+    }
     memzero(wrapped.data(), wrapped.size());
-    wrap(rt, "secure_kv_set", e);
-  }
-  memzero(wrapped.data(), wrapped.size());
-  return jsi::Value::undefined();
+    return jsi::Value::undefined();
+  });
 }
 
 jsi::Value invoke_get(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  std::string key = requireStringAt(rt, "secure_kv_get", "key", args, count, 0);
-  requireValidKey(rt, "secure_kv_get", key);
-  std::optional<std::vector<uint8_t>> result;
-  try {
-    result = SecureKVBackend::get(key);
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_get", e);
-  }
-  if (!result.has_value()) {
-    return jsi::Value::null();
-  }
-  SlotView slot;
-  if (!parseSlot(result->data(), result->size(), slot) ||
-      slot.kind != SlotKind::Blob) {
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    std::string key = requireStringAt(rt, "secure_kv_get", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_get", key);
+    std::optional<std::vector<uint8_t>> result;
+    try {
+      result = SecureKVBackend::get(key);
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_get", e);
+    }
+    if (!result.has_value()) {
+      return jsi::Value::null();
+    }
+    SlotView slot;
+    if (!parseSlot(result->data(), result->size(), slot) ||
+        slot.kind != SlotKind::Blob) {
+      memzero(result->data(), result->size());
+      throw jsi::JSError(
+        rt,
+        std::string("secure_kv_get: slot is ") + slotKindName(slot.kind) +
+          ", expected BLOB"
+      );
+    }
+    std::vector<uint8_t> out(slot.payload, slot.payload + slot.payloadLen);
     memzero(result->data(), result->size());
-    throw jsi::JSError(
-      rt,
-      std::string("secure_kv_get: slot is ") + slotKindName(slot.kind) +
-        ", expected BLOB"
-    );
-  }
-  std::vector<uint8_t> out(slot.payload, slot.payload + slot.payloadLen);
-  memzero(result->data(), result->size());
-  return wrapDigest(rt, std::move(out));
+    return wrapDigest(rt, std::move(out));
+  });
 }
 
 jsi::Value invoke_has(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  std::string key = requireStringAt(rt, "secure_kv_has", "key", args, count, 0);
-  requireValidKey(rt, "secure_kv_has", key);
-  try {
-    return jsi::Value(SecureKVBackend::has(key));
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_has", e);
-  }
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    std::string key = requireStringAt(rt, "secure_kv_has", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_has", key);
+    try {
+      return jsi::Value(SecureKVBackend::has(key));
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_has", e);
+    }
+  });
 }
 
 jsi::Value invoke_delete(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  std::string key =
-    requireStringAt(rt, "secure_kv_delete", "key", args, count, 0);
-  requireValidKey(rt, "secure_kv_delete", key);
-  try {
-    SecureKVBackend::remove(key);
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_delete", e);
-  }
-  return jsi::Value::undefined();
+  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
+    std::string key =
+      requireStringAt(rt, "secure_kv_delete", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_delete", key);
+    try {
+      SecureKVBackend::remove(key);
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_delete", e);
+    }
+    return jsi::Value::undefined();
+  });
 }
 
 jsi::Value invoke_list(
   jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
 ) {
-  std::vector<std::string> keys;
-  try {
-    keys = SecureKVBackend::list();
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_list", e);
-  }
-  jsi::Array out(rt, keys.size());
-  for (size_t i = 0; i < keys.size(); ++i) {
-    out.setValueAtIndex(rt, i, jsi::String::createFromUtf8(rt, keys[i]));
-  }
-  return out;
+  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
+    std::vector<std::string> keys;
+    try {
+      keys = SecureKVBackend::list();
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_list", e);
+    }
+    jsi::Array out(rt, keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      out.setValueAtIndex(rt, i, jsi::String::createFromUtf8(rt, keys[i]));
+    }
+    return out;
+  });
 }
 
 jsi::Value invoke_clear(
   jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
 ) {
-  try {
-    SecureKVBackend::clear();
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_clear", e);
-  }
-  return jsi::Value::undefined();
+  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
+    try {
+      SecureKVBackend::clear();
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_clear", e);
+    }
+    return jsi::Value::undefined();
+  });
 }
 
 jsi::Value invoke_is_hardware_backed(
   jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
 ) {
-  try {
-    return jsi::Value(SecureKVBackend::isHardwareBacked());
-  } catch (const std::exception& e) {
-    wrap(rt, "secure_kv_is_hardware_backed", e);
-  }
+  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
+    try {
+      return jsi::Value(SecureKVBackend::isHardwareBacked());
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_is_hardware_backed", e);
+    }
+  });
 }
 
 }  // namespace

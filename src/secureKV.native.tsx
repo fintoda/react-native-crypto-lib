@@ -1,7 +1,7 @@
 import { type Bip32Curve, encodePath, packPath } from './bip32-utils';
 import { raw, toArrayBuffer } from './buffer';
 import { type Curve, type EcdsaSignature } from './ecdsa';
-import { wrapNative } from './errors';
+import { wrapNativeAsync } from './errors';
 
 /**
  * Access-control gating for `secureKV.set`. Reserved for forward
@@ -13,36 +13,42 @@ export type AccessControl = 'none';
 
 // --- generic blob slot (tag 0x00) ------------------------------------------
 
-const set = wrapNative(
-  (
+const set = wrapNativeAsync(
+  async (
     key: string,
     value: Uint8Array,
     accessControl: AccessControl = 'none'
-  ): void => {
+  ): Promise<void> => {
     if (accessControl !== 'none') {
       throw new Error(
         `secureKV.set: accessControl='${accessControl}' is not yet supported`
       );
     }
-    raw.secure_kv_set(key, toArrayBuffer(value));
+    await raw.secure_kv_set(key, toArrayBuffer(value));
   }
 );
 
-const get = wrapNative((key: string): Uint8Array | null => {
-  const buf = raw.secure_kv_get(key);
+const get = wrapNativeAsync(async (key: string): Promise<Uint8Array | null> => {
+  const buf = await raw.secure_kv_get(key);
   return buf === null ? null : new Uint8Array(buf);
 });
 
-const has = wrapNative((key: string): boolean => raw.secure_kv_has(key));
+const has = wrapNativeAsync(
+  async (key: string): Promise<boolean> => raw.secure_kv_has(key)
+);
 
-const remove = wrapNative((key: string): void => raw.secure_kv_delete(key));
+const remove = wrapNativeAsync(
+  async (key: string): Promise<void> => raw.secure_kv_delete(key)
+);
 
-const list = wrapNative((): string[] => raw.secure_kv_list());
+const list = wrapNativeAsync(
+  async (): Promise<string[]> => raw.secure_kv_list()
+);
 
-const clear = wrapNative((): void => raw.secure_kv_clear());
+const clear = wrapNativeAsync(async (): Promise<void> => raw.secure_kv_clear());
 
-const isHardwareBacked = wrapNative((): boolean =>
-  raw.secure_kv_is_hardware_backed()
+const isHardwareBacked = wrapNativeAsync(
+  async (): Promise<boolean> => raw.secure_kv_is_hardware_backed()
 );
 
 // --- BIP-32 / SLIP-10 derivation slot (tag 0x01) ---------------------------
@@ -51,36 +57,42 @@ function pathBuf(path: string | number[]): ArrayBuffer {
   return typeof path === 'string' ? encodePath(path) : packPath(path);
 }
 
-const bip32_setSeed = wrapNative((alias: string, seed: Uint8Array): void => {
-  raw.secure_kv_bip32_set_seed(alias, toArrayBuffer(seed));
-});
+const bip32_setSeed = wrapNativeAsync(
+  async (alias: string, seed: Uint8Array): Promise<void> => {
+    await raw.secure_kv_bip32_set_seed(alias, toArrayBuffer(seed));
+  }
+);
 
-const bip32_fingerprint = wrapNative(
-  (alias: string, path: string | number[], curve: Bip32Curve): number =>
+const bip32_fingerprint = wrapNativeAsync(
+  async (
+    alias: string,
+    path: string | number[],
+    curve: Bip32Curve
+  ): Promise<number> =>
     raw.secure_kv_bip32_fingerprint(alias, pathBuf(path), curve)
 );
 
-const bip32_getPublicKey = wrapNative(
-  (
+const bip32_getPublicKey = wrapNativeAsync(
+  async (
     alias: string,
     path: string | number[],
     curve: Bip32Curve,
     compact: boolean = true
-  ): Uint8Array =>
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_bip32_get_public(alias, pathBuf(path), curve, compact)
+      await raw.secure_kv_bip32_get_public(alias, pathBuf(path), curve, compact)
     )
 );
 
-const bip32_signEcdsa = wrapNative(
-  (
+const bip32_signEcdsa = wrapNativeAsync(
+  async (
     alias: string,
     path: string | number[],
     digest: Uint8Array,
     curve: Curve
-  ): EcdsaSignature => {
+  ): Promise<EcdsaSignature> => {
     const res = new Uint8Array(
-      raw.secure_kv_bip32_sign_ecdsa(
+      await raw.secure_kv_bip32_sign_ecdsa(
         alias,
         pathBuf(path),
         toArrayBuffer(digest),
@@ -91,15 +103,15 @@ const bip32_signEcdsa = wrapNative(
   }
 );
 
-const bip32_signSchnorr = wrapNative(
-  (
+const bip32_signSchnorr = wrapNativeAsync(
+  async (
     alias: string,
     path: string | number[],
     digest: Uint8Array,
     aux?: Uint8Array
-  ): Uint8Array =>
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_bip32_sign_schnorr(
+      await raw.secure_kv_bip32_sign_schnorr(
         alias,
         pathBuf(path),
         toArrayBuffer(digest),
@@ -108,15 +120,15 @@ const bip32_signSchnorr = wrapNative(
     )
 );
 
-const bip32_signSchnorrTaproot = wrapNative(
-  (
+const bip32_signSchnorrTaproot = wrapNativeAsync(
+  async (
     alias: string,
     path: string | number[],
     digest: Uint8Array,
     merkleRoot?: Uint8Array
-  ): Uint8Array =>
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_bip32_sign_schnorr_taproot(
+      await raw.secure_kv_bip32_sign_schnorr_taproot(
         alias,
         pathBuf(path),
         toArrayBuffer(digest),
@@ -125,22 +137,30 @@ const bip32_signSchnorrTaproot = wrapNative(
     )
 );
 
-const bip32_signEd25519 = wrapNative(
-  (alias: string, path: string | number[], msg: Uint8Array): Uint8Array =>
+const bip32_signEd25519 = wrapNativeAsync(
+  async (
+    alias: string,
+    path: string | number[],
+    msg: Uint8Array
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_bip32_sign_ed25519(alias, pathBuf(path), toArrayBuffer(msg))
+      await raw.secure_kv_bip32_sign_ed25519(
+        alias,
+        pathBuf(path),
+        toArrayBuffer(msg)
+      )
     )
 );
 
-const bip32_ecdh = wrapNative(
-  (
+const bip32_ecdh = wrapNativeAsync(
+  async (
     alias: string,
     path: string | number[],
     peerPub: Uint8Array,
     curve: Curve
-  ): Uint8Array =>
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_bip32_ecdh(
+      await raw.secure_kv_bip32_ecdh(
         alias,
         pathBuf(path),
         toArrayBuffer(peerPub),
@@ -151,30 +171,34 @@ const bip32_ecdh = wrapNative(
 
 // --- raw 32-byte private key slot (tag 0x02) -------------------------------
 
-const raw_setPrivate = wrapNative(
-  (alias: string, priv: Uint8Array, curve: Bip32Curve): void => {
-    raw.secure_kv_raw_set_private(alias, toArrayBuffer(priv), curve);
+const raw_setPrivate = wrapNativeAsync(
+  async (alias: string, priv: Uint8Array, curve: Bip32Curve): Promise<void> => {
+    await raw.secure_kv_raw_set_private(alias, toArrayBuffer(priv), curve);
   }
 );
 
-const raw_getPublicKey = wrapNative(
-  (alias: string, compact: boolean = true): Uint8Array =>
-    new Uint8Array(raw.secure_kv_raw_get_public(alias, compact))
+const raw_getPublicKey = wrapNativeAsync(
+  async (alias: string, compact: boolean = true): Promise<Uint8Array> =>
+    new Uint8Array(await raw.secure_kv_raw_get_public(alias, compact))
 );
 
-const raw_signEcdsa = wrapNative(
-  (alias: string, digest: Uint8Array): EcdsaSignature => {
+const raw_signEcdsa = wrapNativeAsync(
+  async (alias: string, digest: Uint8Array): Promise<EcdsaSignature> => {
     const res = new Uint8Array(
-      raw.secure_kv_raw_sign_ecdsa(alias, toArrayBuffer(digest))
+      await raw.secure_kv_raw_sign_ecdsa(alias, toArrayBuffer(digest))
     );
     return { signature: res.slice(1), recId: res[0] as number };
   }
 );
 
-const raw_signSchnorr = wrapNative(
-  (alias: string, digest: Uint8Array, aux?: Uint8Array): Uint8Array =>
+const raw_signSchnorr = wrapNativeAsync(
+  async (
+    alias: string,
+    digest: Uint8Array,
+    aux?: Uint8Array
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_raw_sign_schnorr(
+      await raw.secure_kv_raw_sign_schnorr(
         alias,
         toArrayBuffer(digest),
         aux ? toArrayBuffer(aux) : null
@@ -182,10 +206,14 @@ const raw_signSchnorr = wrapNative(
     )
 );
 
-const raw_signSchnorrTaproot = wrapNative(
-  (alias: string, digest: Uint8Array, merkleRoot?: Uint8Array): Uint8Array =>
+const raw_signSchnorrTaproot = wrapNativeAsync(
+  async (
+    alias: string,
+    digest: Uint8Array,
+    merkleRoot?: Uint8Array
+  ): Promise<Uint8Array> =>
     new Uint8Array(
-      raw.secure_kv_raw_sign_schnorr_taproot(
+      await raw.secure_kv_raw_sign_schnorr_taproot(
         alias,
         toArrayBuffer(digest),
         merkleRoot ? toArrayBuffer(merkleRoot) : null
@@ -193,19 +221,25 @@ const raw_signSchnorrTaproot = wrapNative(
     )
 );
 
-const raw_signEd25519 = wrapNative(
-  (alias: string, msg: Uint8Array): Uint8Array =>
-    new Uint8Array(raw.secure_kv_raw_sign_ed25519(alias, toArrayBuffer(msg)))
+const raw_signEd25519 = wrapNativeAsync(
+  async (alias: string, msg: Uint8Array): Promise<Uint8Array> =>
+    new Uint8Array(
+      await raw.secure_kv_raw_sign_ed25519(alias, toArrayBuffer(msg))
+    )
 );
 
-const raw_ecdh = wrapNative(
-  (alias: string, peerPub: Uint8Array): Uint8Array =>
-    new Uint8Array(raw.secure_kv_raw_ecdh(alias, toArrayBuffer(peerPub)))
+const raw_ecdh = wrapNativeAsync(
+  async (alias: string, peerPub: Uint8Array): Promise<Uint8Array> =>
+    new Uint8Array(await raw.secure_kv_raw_ecdh(alias, toArrayBuffer(peerPub)))
 );
 
 /**
- * Hardware-backed key/value store, with optional native-only signing
+ * Hardware-backed key/value store with optional native-only signing
  * primitives layered on top.
+ *
+ * **All methods are async.** This is the only domain in the library that
+ * crosses an OS-IO / Keychain boundary, so the API is `Promise`-returning
+ * end to end. Validation errors surface as Promise rejections too.
  *
  * Three slot families backed by the same encrypted storage:
  *
@@ -225,7 +259,7 @@ const raw_ecdh = wrapNative(
  * the bundled `data_extraction_rules.xml`. Blobs are wiped on
  * uninstall or factory reset — see README "secureKV — durability".
  *
- * `get`, `list`, and the sign / derive methods throw
+ * `get`, `list`, and the sign / derive methods reject with
  * {@link SecureKVUnavailableError} when the OS-managed master key has
  * been invalidated. Treat existing secrets as lost and re-derive them.
  */
