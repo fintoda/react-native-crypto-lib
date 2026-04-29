@@ -74,6 +74,18 @@ void requireValidAlias(
   throw jsi::JSError(rt, std::string(op) + ": " + e.what());
 }
 
+// Same parsing rule as cpp/SecureKV.cpp's parseAccessControl. Duplicated
+// rather than shared via Common.h because both files would otherwise need
+// to include SecureKVBackend.h transitively through it.
+AccessControl parseAccessControl(
+  jsi::Runtime& rt, const char* op, const std::string& s
+) {
+  if (s == "none") return AccessControl::None;
+  if (s == "biometric") return AccessControl::Biometric;
+  throw jsi::JSError(
+    rt, std::string(op) + ": unknown accessControl '" + s + "'");
+}
+
 uint8_t curveTagFromString(const std::string& s) {
   if (s == "secp256k1") return kCurveTagSecp256k1;
   if (s == "nist256p1") return kCurveTagNist256p1;
@@ -261,23 +273,24 @@ void deriveFromSeed(
 jsi::Value bip32_set_seed_sync(
   jsi::Runtime& rt, const jsi::Value* args, size_t count
 ) {
-  std::string alias = requireStringAt(
-    rt, "secure_kv_bip32_set_seed", "key", args, count, 0);
-  requireValidAlias(rt, "secure_kv_bip32_set_seed", alias);
-  auto seed = requireArrayBufferAt(
-    rt, "secure_kv_bip32_set_seed", "seed", args, count, 1);
+  const char* op = "secure_kv_bip32_set_seed";
+  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+  requireValidAlias(rt, op, alias);
+  auto seed = requireArrayBufferAt(rt, op, "seed", args, count, 1);
   size_t len = seed.size(rt);
   if (len < kMinSeedPayloadLen || len > kMaxSeedPayloadLen) {
     throw jsi::JSError(
       rt,
-      "secure_kv_bip32_set_seed: seed must be 16..64 bytes (BIP-32 spec)");
+      std::string(op) + ": seed must be 16..64 bytes (BIP-32 spec)");
   }
+  std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 2);
+  AccessControl ac = parseAccessControl(rt, op, acStr);
   auto wrapped = wrapSeedSlot(seed.data(rt), len);
   try {
-    SecureKVBackend::set(alias, wrapped.data(), wrapped.size());
+    SecureKVBackend::set(alias, wrapped.data(), wrapped.size(), ac);
   } catch (const std::exception& e) {
     memzero(wrapped.data(), wrapped.size());
-    rethrowAsJsi(rt, "secure_kv_bip32_set_seed", e);
+    rethrowAsJsi(rt, op, e);
   }
   memzero(wrapped.data(), wrapped.size());
   return jsi::Value::undefined();
@@ -575,9 +588,11 @@ jsi::Value raw_set_private_sync(
     }
     memzero(probe, sizeof(probe));
   }
+  std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 3);
+  AccessControl ac = parseAccessControl(rt, op, acStr);
   auto wrapped = wrapRawSlot(curveTag, priv.data(rt));
   try {
-    SecureKVBackend::set(alias, wrapped.data(), wrapped.size());
+    SecureKVBackend::set(alias, wrapped.data(), wrapped.size(), ac);
   } catch (const std::exception& e) {
     memzero(wrapped.data(), wrapped.size());
     rethrowAsJsi(rt, op, e);
@@ -922,7 +937,7 @@ jsi::Value invoke_raw_ecdh(
 
 void registerSecureKVSignMethods(MethodMap& map) {
   // BIP-32 / SLIP-10 derivation on a stored seed
-  map.push_back({"secure_kv_bip32_set_seed",            2, invoke_bip32_set_seed});
+  map.push_back({"secure_kv_bip32_set_seed",            3, invoke_bip32_set_seed});
   map.push_back({"secure_kv_bip32_fingerprint",         3, invoke_bip32_fingerprint});
   map.push_back({"secure_kv_bip32_get_public",          4, invoke_bip32_get_public});
   map.push_back({"secure_kv_bip32_sign_ecdsa",          4, invoke_bip32_sign_ecdsa});
@@ -932,7 +947,7 @@ void registerSecureKVSignMethods(MethodMap& map) {
   map.push_back({"secure_kv_bip32_ecdh",                4, invoke_bip32_ecdh});
 
   // Raw 32-byte private key without derivation
-  map.push_back({"secure_kv_raw_set_private",           3, invoke_raw_set_private});
+  map.push_back({"secure_kv_raw_set_private",           4, invoke_raw_set_private});
   map.push_back({"secure_kv_raw_get_public",            2, invoke_raw_get_public});
   map.push_back({"secure_kv_raw_sign_ecdsa",            2, invoke_raw_sign_ecdsa});
   map.push_back({"secure_kv_raw_sign_schnorr",          3, invoke_raw_sign_schnorr});

@@ -2,10 +2,15 @@ import { type Bip32Curve } from './bip32-utils';
 import { type Curve, type EcdsaSignature } from './ecdsa';
 
 /**
- * Access-control gating for `secureKV.set`. Reserved for forward
- * compatibility — only `'none'` is accepted today.
+ * Per-item access-control gating. See `secureKV.native.tsx` for the
+ * full doc — `'none'` is always allowed; `'biometric'` is iOS-only in
+ * Phase 1. Discriminated union for forward compatibility.
  */
-export type AccessControl = 'none';
+export type AccessControlOptions =
+  | { accessControl: 'none' }
+  | { accessControl: 'biometric' };
+
+export type AccessControl = AccessControlOptions['accessControl'];
 
 const unsupported = async (): Promise<never> => {
   throw new Error(
@@ -18,7 +23,7 @@ export const secureKV = {
   set: unsupported as (
     key: string,
     value: Uint8Array,
-    accessControl?: AccessControl
+    options?: AccessControlOptions
   ) => Promise<void>,
   get: unsupported as (key: string) => Promise<Uint8Array | null>,
   has: unsupported as (key: string) => Promise<boolean>,
@@ -28,7 +33,11 @@ export const secureKV = {
   isHardwareBacked: unsupported as () => Promise<boolean>,
 
   bip32: {
-    setSeed: unsupported as (alias: string, seed: Uint8Array) => Promise<void>,
+    setSeed: unsupported as (
+      alias: string,
+      seed: Uint8Array,
+      options?: AccessControlOptions
+    ) => Promise<void>,
     fingerprint: unsupported as (
       alias: string,
       path: string | number[],
@@ -75,7 +84,8 @@ export const secureKV = {
     setPrivate: unsupported as (
       alias: string,
       priv: Uint8Array,
-      curve: Bip32Curve
+      curve: Bip32Curve,
+      options?: AccessControlOptions
     ) => Promise<void>,
     getPublicKey: unsupported as (
       alias: string,

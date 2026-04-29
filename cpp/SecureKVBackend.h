@@ -8,6 +8,16 @@
 
 namespace facebook::react::cryptolib {
 
+// Per-item access-control gating. Stored alongside the item at provisioning;
+// reads inherit it. Future variants will go here without breaking call sites.
+enum class AccessControl : uint8_t {
+  // No prompt; item is readable while the device is unlocked.
+  None = 0,
+  // Requires a biometric prompt (Face ID / Touch ID / fingerprint) on every
+  // read. Phase 1 = per-call only; session-window support comes later.
+  Biometric = 1,
+};
+
 // Platform-agnostic interface to a hardware-backed key/value store.
 //
 // The iOS implementation (ios/SecureKVBackend.mm) wraps Security.framework
@@ -23,7 +33,12 @@ namespace facebook::react::cryptolib {
 // size limits before calling these.
 class SecureKVBackend {
  public:
-  static void set(const std::string& key, const uint8_t* data, size_t len);
+  static void set(
+    const std::string& key,
+    const uint8_t* data,
+    size_t len,
+    AccessControl ac
+  );
   static std::optional<std::vector<uint8_t>> get(const std::string& key);
   static bool has(const std::string& key);
   static void remove(const std::string& key);

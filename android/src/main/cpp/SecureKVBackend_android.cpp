@@ -44,17 +44,18 @@ constexpr const char* kBridge =
 }  // namespace
 
 void SecureKVBackend::set(
-  const std::string& key, const uint8_t* data, size_t len
+  const std::string& key, const uint8_t* data, size_t len, AccessControl ac
 ) {
   try {
     auto cls = jni::findClassStatic(kBridge);
-    auto method = cls->getStaticMethod<void(jstring, jbyteArray)>("set");
+    auto method =
+      cls->getStaticMethod<void(jstring, jbyteArray, jint)>("set");
     auto keyJ = jni::make_jstring(key);
     auto valueJ = jni::JArrayByte::newArray(len);
     if (len > 0) {
       valueJ->setRegion(0, len, reinterpret_cast<const jbyte*>(data));
     }
-    method(cls, keyJ.get(), valueJ.get());
+    method(cls, keyJ.get(), valueJ.get(), static_cast<jint>(ac));
   } catch (const jni::JniException& e) {
     rethrow(e);
   }

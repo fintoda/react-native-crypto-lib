@@ -4,12 +4,28 @@ import { type Curve, type EcdsaSignature } from './ecdsa';
 import { wrapNativeAsync } from './errors';
 
 /**
- * Access-control gating for `secureKV.set`. Reserved for forward
- * compatibility — only `'none'` is accepted today. Future versions will
- * add `'biometric'` etc. without breaking call sites that already pass
- * (or omit) the third argument.
+ * Per-item access-control gating for secureKV. Discriminated union so
+ * future variants (passcode-only, biometric-or-passcode, validity
+ * windows) can be added without breaking existing call sites — they
+ * will appear as additional members of the `accessControl` discriminator.
+ *
+ * - `'none'` — no prompt. Item is readable while the device is unlocked.
+ * - `'biometric'` — every read triggers a system biometric prompt
+ *   (Face ID / Touch ID / fingerprint). On iOS, the item is bound to
+ *   `kSecAccessControlBiometryCurrentSet`, so re-enrolling biometrics
+ *   invalidates the item. **Android support lands in a future release**;
+ *   provisioning a key with `'biometric'` on Android currently rejects
+ *   with a clear error.
  */
-export type AccessControl = 'none';
+export type AccessControlOptions =
+  | { accessControl: 'none' }
+  | { accessControl: 'biometric' };
+
+/** Legacy single-string alias of `AccessControl`. Kept as a type-only
+ *  re-export for callers that read just the discriminator value. */
+export type AccessControl = AccessControlOptions['accessControl'];
+
+const DEFAULT_AC: AccessControlOptions = { accessControl: 'none' };
 
 // --- generic blob slot (tag 0x00) ------------------------------------------
 
@@ -17,14 +33,9 @@ const set = wrapNativeAsync(
   async (
     key: string,
     value: Uint8Array,
-    accessControl: AccessControl = 'none'
+    options: AccessControlOptions = DEFAULT_AC
   ): Promise<void> => {
-    if (accessControl !== 'none') {
-      throw new Error(
-        `secureKV.set: accessControl='${accessControl}' is not yet supported`
-      );
-    }
-    await raw.secure_kv_set(key, toArrayBuffer(value));
+    await raw.secure_kv_set(key, toArrayBuffer(value), options.accessControl);
   }
 );
 
@@ -58,8 +69,16 @@ function pathBuf(path: string | number[]): ArrayBuffer {
 }
 
 const bip32_setSeed = wrapNativeAsync(
-  async (alias: string, seed: Uint8Array): Promise<void> => {
-    await raw.secure_kv_bip32_set_seed(alias, toArrayBuffer(seed));
+  async (
+    alias: string,
+    seed: Uint8Array,
+    options: AccessControlOptions = DEFAULT_AC
+  ): Promise<void> => {
+    await raw.secure_kv_bip32_set_seed(
+      alias,
+      toArrayBuffer(seed),
+      options.accessControl
+    );
   }
 );
 
@@ -172,8 +191,18 @@ const bip32_ecdh = wrapNativeAsync(
 // --- raw 32-byte private key slot (tag 0x02) -------------------------------
 
 const raw_setPrivate = wrapNativeAsync(
-  async (alias: string, priv: Uint8Array, curve: Bip32Curve): Promise<void> => {
-    await raw.secure_kv_raw_set_private(alias, toArrayBuffer(priv), curve);
+  async (
+    alias: string,
+    priv: Uint8Array,
+    curve: Bip32Curve,
+    options: AccessControlOptions = DEFAULT_AC
+  ): Promise<void> => {
+    await raw.secure_kv_raw_set_private(
+      alias,
+      toArrayBuffer(priv),
+      curve,
+      options.accessControl
+    );
   }
 );
 

@@ -465,7 +465,7 @@ routine signing — see [Native-only signing](#native-only-signing) below.
 import {
   secureKV,
   SecureKVUnavailableError,
-  type AccessControl,
+  type AccessControlOptions,
 } from '@fintoda/react-native-crypto-lib';
 ```
 
@@ -476,11 +476,15 @@ import {
 > the API is async end to end. Validation errors surface as Promise
 > rejections too, so a single `try/await` catches everything.
 
-- `secureKV.set(key, value, accessControl? = 'none')` →
-  `Promise<void>`. Stores `value: Uint8Array` under `key`. Silently
-  overwrites an existing value. `accessControl` is currently restricted
-  to `'none'`; it's reserved for future biometric / user-presence
-  gating without breaking call sites.
+- `secureKV.set(key, value, options?)` → `Promise<void>`. Stores
+  `value: Uint8Array` under `key`. Silently overwrites an existing
+  value. `options` is an `AccessControlOptions` discriminated union:
+  - `{ accessControl: 'none' }` (default) — readable while the device
+    is unlocked, no prompt.
+  - `{ accessControl: 'biometric' }` — every read triggers a system
+    biometric prompt (Face ID / Touch ID / fingerprint). **iOS only in
+    this release**; Android refuses with a clear error pending the
+    next phase.
 - `secureKV.get(key)` → `Promise<Uint8Array | null>`. Resolves to `null`
   if the key was never set or has been deleted. Rejects with
   `SecureKVUnavailableError` if the OS-managed master key has been
@@ -510,6 +514,55 @@ use `secureKV` concurrently fails fast with a clear misconfiguration
 error rather than racing on master-key creation. If your app uses
 `android:process=` overrides, restrict `secureKV` access to one
 process.
+
+### Biometric gating
+
+Provision a key with `accessControl: 'biometric'` to require a system
+biometric prompt on every read. The prompt is shown by the OS — neither
+this library nor your application code sees the biometric data; success
+just hands the key material back to the C++ crypto path.
+
+```ts
+// Provision once. The seed never re-enters JS.
+const seed = bip39.toSeed(mnemonic);
+await secureKV.bip32.setSeed('wallet', seed, { accessControl: 'biometric' });
+seed.fill(0);
+
+// Every sign triggers Face ID / Touch ID. The user can decline; the
+// Promise rejects in that case (caller should treat decline as cancel,
+// not as a hard error).
+try {
+  const sig = await secureKV.bip32.signEcdsa(
+    'wallet', "m/44'/0'/0'/0/0", digest, 'secp256k1'
+  );
+} catch (e) {
+  if (e instanceof CryptoError && e.reason.includes('user canceled')) {
+    // user dismissed the prompt; surface a polite UI, don't retry
+  } else {
+    throw e;
+  }
+}
+```
+
+**Platform support — Phase 1.** iOS-only. The Keychain item is bound to
+`kSecAccessControlBiometryCurrentSet`, so re-enrolling biometrics
+(adding/removing a fingerprint or Face ID) **invalidates the item** —
+the threat model is "attacker steals the unlocked device and tries to
+add their own biometric." Subsequent reads will fail with
+`SecureKVUnavailableError` and the app should treat the data as lost.
+
+Android support is intentionally deferred: it requires plumbing the
+current `Activity` through to `BiometricPrompt`, plus a separate
+user-authentication-required Keystore master key. Provisioning a key
+with `accessControl: 'biometric'` on Android currently rejects with a
+clear `not yet implemented` error so the call site stays explicit
+rather than silently degrading to non-biometric.
+
+A future release will add session windows
+(`{ accessControl: 'biometric'; validityWindow: N }`) so a single
+prompt can authorise N seconds of subsequent reads — the
+discriminator-union API shape is forward-compatible without breaking
+existing call sites.
 
 ### Native-only signing
 
@@ -570,7 +623,7 @@ brevity. `await` everything.
 
 | method | resolves to | curves |
 |---|---|---|
-| `setSeed(alias, seed)` | `void` | — |
+| `setSeed(alias, seed, options?)` | `void` | `options` is `AccessControlOptions` — see [Biometric gating](#biometric-gating) |
 | `fingerprint(alias, path, curve)` | `number` (4-byte BE fingerprint of the derived node) | secp256k1 / nist256p1 / ed25519 |
 | `getPublicKey(alias, path, curve, compact?)` | `Uint8Array` (33B compressed by default; 65B uncompressed for ECDSA curves; 32B for ed25519) | secp256k1 / nist256p1 / ed25519 |
 | `signEcdsa(alias, path, digest, curve)` | `{ signature: Uint8Array(64), recId: 0..3 }` (RFC 6979 deterministic, low-S) | secp256k1 / nist256p1 |
@@ -598,7 +651,7 @@ All methods are async; the table elides the `Promise<...>` wrapper.
 
 | method | resolves to | requires |
 |---|---|---|
-| `setPrivate(alias, priv, curve)` | `void` | priv is 32 bytes; for ECDSA curves it must be in `[1, n-1]` (validated up-front) |
+| `setPrivate(alias, priv, curve, options?)` | `void` | priv is 32 bytes; for ECDSA curves it must be in `[1, n-1]` (validated up-front). `options` is `AccessControlOptions` — see [Biometric gating](#biometric-gating) |
 | `getPublicKey(alias, compact?)` | `Uint8Array` (33B / 65B for ECDSA, 32B for ed25519) | curve from slot |
 | `signEcdsa(alias, digest)` | `{ signature, recId }` | slot curve must be secp256k1 / nist256p1 |
 | `signSchnorr(alias, digest, aux?)` | `Uint8Array(64)` | slot curve must be secp256k1 |

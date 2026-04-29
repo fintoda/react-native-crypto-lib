@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <LocalAuthentication/LocalAuthentication.h>
 #import <Security/Security.h>
 
 #include "../cpp/SecureKVBackend.h"
@@ -52,14 +53,15 @@ NSDictionary* baseQuery(const std::string& key) {
 }  // namespace
 
 void SecureKVBackend::set(
-  const std::string& key, const uint8_t* data, size_t len
+  const std::string& key, const uint8_t* data, size_t len, AccessControl ac
 ) {
   NSData* value = [NSData dataWithBytes:data length:len];
 
   // Overwrite semantics: drop any existing item, then add fresh. We don't
   // use SecItemUpdate because an item created by an older accessibility
   // attribute (e.g. before our default changed) would silently keep that
-  // attribute on update.
+  // attribute on update — a real footgun if the caller switches a key
+  // from 'none' to 'biometric'.
   NSMutableDictionary* delQuery = [baseQuery(key) mutableCopy];
   OSStatus delStatus = SecItemDelete((__bridge CFDictionaryRef)delQuery);
   if (delStatus != errSecSuccess && delStatus != errSecItemNotFound) {
@@ -67,9 +69,32 @@ void SecureKVBackend::set(
   }
 
   NSMutableDictionary* add = [baseQuery(key) mutableCopy];
-  add[(__bridge id)kSecAttrAccessible] =
-    (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
   add[(__bridge id)kSecValueData] = value;
+
+  if (ac == AccessControl::Biometric) {
+    // SecAccessControl supersedes kSecAttrAccessible. Use
+    // kSecAccessControlBiometryCurrentSet so that a re-enrollment of
+    // biometrics (adding/removing a fingerprint or Face ID) invalidates
+    // the item — defence against a stolen device whose threat model is
+    // "attacker enrolls their own biometrics".
+    CFErrorRef cfErr = NULL;
+    SecAccessControlRef acRef = SecAccessControlCreateWithFlags(
+      kCFAllocatorDefault,
+      kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+      kSecAccessControlBiometryCurrentSet,
+      &cfErr
+    );
+    if (acRef == NULL) {
+      NSError* nsErr = (__bridge_transfer NSError*)cfErr;
+      throw std::runtime_error(
+        std::string("secureKV.set: SecAccessControlCreate failed: ") +
+        [[nsErr description] UTF8String]);
+    }
+    add[(__bridge id)kSecAttrAccessControl] = (__bridge_transfer id)acRef;
+  } else {
+    add[(__bridge id)kSecAttrAccessible] =
+      (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+  }
 
   OSStatus status = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
   if (status != errSecSuccess) {

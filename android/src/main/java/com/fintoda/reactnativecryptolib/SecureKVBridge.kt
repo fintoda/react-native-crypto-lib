@@ -216,9 +216,30 @@ object SecureKVBridge {
     return Pair(String(keyBytes, Charsets.UTF_8), value)
   }
 
+  // Mirrors cpp/SecureKVBackend.h's AccessControl enum.
+  private const val ACCESS_CONTROL_NONE: Int = 0
+  private const val ACCESS_CONTROL_BIOMETRIC: Int = 1
+
   @JvmStatic
-  fun set(key: String, value: ByteArray) {
+  fun set(key: String, value: ByteArray, accessControl: Int) {
     assertSingleProcess()
+    if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
+      // Phase 1 ships biometric for iOS only. Android requires plumbing the
+      // current Activity through to BiometricPrompt + a separate
+      // user-authentication-required Keystore master key. Tracked as
+      // a follow-up; failing here keeps the iOS API usable today without
+      // accidentally storing a key under the non-biometric master and
+      // surprising the caller later.
+      throw UnsupportedOperationException(
+        "secureKV: accessControl='biometric' is not yet implemented on " +
+          "Android; only iOS supports it in this release."
+      )
+    }
+    if (accessControl != ACCESS_CONTROL_NONE) {
+      throw IllegalArgumentException(
+        "secureKV: unknown accessControl variant $accessControl"
+      )
+    }
     synchronized(lock) {
       val masterKey = getOrCreateMasterKey()
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")

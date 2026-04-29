@@ -29,6 +29,19 @@ bool isValidKeyChar(char c) {
   throw jsi::JSError(rt, std::string(op) + ": " + e.what());
 }
 
+// Parses the JS-side accessControl string. Phase 1 accepts 'none' and
+// 'biometric'; the schema is forward-compatible with future variants
+// (e.g. 'biometric_or_passcode') because unknown values are rejected
+// here rather than silently ignored.
+AccessControl parseAccessControl(
+  jsi::Runtime& rt, const char* op, const std::string& s
+) {
+  if (s == "none") return AccessControl::None;
+  if (s == "biometric") return AccessControl::Biometric;
+  throw jsi::JSError(
+    rt, std::string(op) + ": unknown accessControl '" + s + "'");
+}
+
 void requireValidKey(jsi::Runtime& rt, const char* op, const std::string& key) {
   if (key.empty() || key.size() > kMaxKeyLen) {
     throw jsi::JSError(rt, std::string(op) + ": key length out of range");
@@ -52,9 +65,12 @@ jsi::Value invoke_set(
     if (len > kMaxValueLen) {
       throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
     }
+    std::string acStr =
+      requireStringAt(rt, "secure_kv_set", "accessControl", args, count, 2);
+    AccessControl ac = parseAccessControl(rt, "secure_kv_set", acStr);
     auto wrapped = wrapBlobSlot(safeData(rt, value), len);
     try {
-      SecureKVBackend::set(key, wrapped.data(), wrapped.size());
+      SecureKVBackend::set(key, wrapped.data(), wrapped.size(), ac);
     } catch (const std::exception& e) {
       memzero(wrapped.data(), wrapped.size());
       wrap(rt, "secure_kv_set", e);
@@ -171,7 +187,7 @@ jsi::Value invoke_is_hardware_backed(
 }  // namespace
 
 void registerSecureKVMethods(MethodMap& map) {
-  map.push_back({"secure_kv_set",                2, invoke_set});
+  map.push_back({"secure_kv_set",                3, invoke_set});
   map.push_back({"secure_kv_get",                1, invoke_get});
   map.push_back({"secure_kv_has",                1, invoke_has});
   map.push_back({"secure_kv_delete",             1, invoke_delete});

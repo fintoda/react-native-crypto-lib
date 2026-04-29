@@ -250,7 +250,13 @@ export interface RawSpec {
    * reset) surface as CryptoError with reason "unavailable" — the JS
    * wrapper upgrades those to SecureKVUnavailableError.
    */
-  secure_kv_set(key: string, value: ArrayBuffer): Promise<void>;
+  /** accessControl is "none" | "biometric" — see AccessControl in
+   *  cpp/SecureKVBackend.h. Phase 1 supports biometric on iOS only. */
+  secure_kv_set(
+    key: string,
+    value: ArrayBuffer,
+    accessControl: string
+  ): Promise<void>;
   secure_kv_get(key: string): Promise<ArrayBuffer | null>;
   secure_kv_has(key: string): Promise<boolean>;
   secure_kv_delete(key: string): Promise<void>;
@@ -279,7 +285,11 @@ export interface RawSpec {
    * `secure_kv_bip32_sign_ecdsa` and `secure_kv_raw_sign_ecdsa` return
    * 65 bytes laid out as `[recId, sig[0..64]]`, matching `ecdsa_sign`.
    */
-  secure_kv_bip32_set_seed(key: string, seed: ArrayBuffer): Promise<void>;
+  secure_kv_bip32_set_seed(
+    key: string,
+    seed: ArrayBuffer,
+    accessControl: string
+  ): Promise<void>;
   secure_kv_bip32_fingerprint(
     key: string,
     path: ArrayBuffer,
@@ -324,7 +334,8 @@ export interface RawSpec {
   secure_kv_raw_set_private(
     key: string,
     priv: ArrayBuffer,
-    curve: string
+    curve: string,
+    accessControl: string
   ): Promise<void>;
   secure_kv_raw_get_public(key: string, compact: boolean): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ecdsa(
