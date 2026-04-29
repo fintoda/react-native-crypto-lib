@@ -1536,8 +1536,14 @@ function secureKVSignTests(): TestResult[] {
 
   // ----- size / format validation -----
   results.push(
-    throws('secureKV.bip32.setSeed wrong size throws', () => {
-      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(32));
+    throws('secureKV.bip32.setSeed below 16 bytes throws', () => {
+      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(8));
+    })
+  );
+
+  results.push(
+    throws('secureKV.bip32.setSeed above 64 bytes throws', () => {
+      secureKV.bip32.setSeed(k('badseed'), new Uint8Array(65));
     })
   );
 
