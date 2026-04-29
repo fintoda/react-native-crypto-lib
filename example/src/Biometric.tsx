@@ -56,6 +56,11 @@ const FIXED_SEED = (() => {
   return out;
 })();
 
+async function probeBiometricStatus(): Promise<string> {
+  const status = await secureKV.biometricStatus();
+  return `Status: ${status}`;
+}
+
 async function setBiometricBlob(): Promise<string> {
   const value = ascii('biometric blob payload');
   await secureKV.set(KEY_BLOB, value, { accessControl: 'biometric' });
@@ -139,6 +144,11 @@ async function cleanup(): Promise<string> {
 }
 
 const STEPS: { id: string; label: string; fn: StepFn }[] = [
+  {
+    id: 'status',
+    label: '0. Probe availability (no prompt)',
+    fn: probeBiometricStatus,
+  },
   {
     id: 'set_blob',
     label: '1. Provision biometric BLOB',

@@ -18,6 +18,27 @@ enum class AccessControl : uint8_t {
   Biometric = 1,
 };
 
+// Biometric availability snapshot. Lets callers query whether
+// `accessControl='biometric'` would even work before they try to use it.
+// Strings are stable and used directly by the JS-side enum.
+enum class BiometricStatus {
+  // Biometric is enrolled and ready; provisioning / reads will prompt.
+  Available,
+  // No biometric hardware on this device (Class 3 / strong).
+  NoHardware,
+  // Hardware is present but no biometric is enrolled. The user can fix
+  // this by going to Settings.
+  NotEnrolled,
+  // Hardware is temporarily unavailable (sensor failure, lockout).
+  HardwareUnavailable,
+  // Android only: device requires a security update before biometric
+  // operations are allowed.
+  SecurityUpdateRequired,
+  // Android API < 28; iOS too old for LAPolicy. The library declines
+  // biometric on these devices regardless of hardware.
+  UnsupportedOs,
+};
+
 // Platform-agnostic interface to a hardware-backed key/value store.
 //
 // The iOS implementation (ios/SecureKVBackend.mm) wraps Security.framework
@@ -45,6 +66,7 @@ class SecureKVBackend {
   static std::vector<std::string> list();
   static void clear();
   static bool isHardwareBacked();
+  static BiometricStatus biometricStatus();
 };
 
 }  // namespace facebook::react::cryptolib

@@ -188,4 +188,24 @@ bool SecureKVBackend::isHardwareBacked() {
   return true;
 }
 
+BiometricStatus SecureKVBackend::biometricStatus() {
+  LAContext* ctx = [[LAContext alloc] init];
+  NSError* err = nil;
+  BOOL ok = [ctx canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                             error:&err];
+  if (ok) return BiometricStatus::Available;
+  if (err == nil) return BiometricStatus::HardwareUnavailable;
+  switch (err.code) {
+    case LAErrorBiometryNotEnrolled:
+    case LAErrorPasscodeNotSet:
+      return BiometricStatus::NotEnrolled;
+    case LAErrorBiometryNotAvailable:
+      return BiometricStatus::NoHardware;
+    case LAErrorBiometryLockout:
+      return BiometricStatus::HardwareUnavailable;
+    default:
+      return BiometricStatus::HardwareUnavailable;
+  }
+}
+
 }  // namespace facebook::react::cryptolib

@@ -504,6 +504,12 @@ import {
   Enclave-protected with `*ThisDeviceOnly` accessibility); Android
   reports whether the master key landed in TEE / StrongBox vs. software
   keystore.
+- `secureKV.biometricStatus()` → `Promise<BiometricStatus>`. Returns
+  one of `'available'`, `'no_hardware'`, `'not_enrolled'`,
+  `'hardware_unavailable'`, `'security_update_required'`,
+  `'unsupported_os'`. Does **not** trigger a biometric prompt — safe to
+  call at app startup to decide whether to even offer
+  `accessControl: 'biometric'` in your UI.
 
 `key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
 The store is per-app — two apps using this library on the same device

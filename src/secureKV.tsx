@@ -12,6 +12,14 @@ export type AccessControlOptions =
 
 export type AccessControl = AccessControlOptions['accessControl'];
 
+export type BiometricStatus =
+  | 'available'
+  | 'no_hardware'
+  | 'not_enrolled'
+  | 'hardware_unavailable'
+  | 'security_update_required'
+  | 'unsupported_os';
+
 const unsupported = async (): Promise<never> => {
   throw new Error(
     "'@fintoda/react-native-crypto-lib' is only supported on native platforms."
@@ -31,6 +39,7 @@ export const secureKV = {
   list: unsupported as () => Promise<string[]>,
   clear: unsupported as () => Promise<void>,
   isHardwareBacked: unsupported as () => Promise<boolean>,
+  biometricStatus: unsupported as () => Promise<BiometricStatus>,
 
   bip32: {
     setSeed: unsupported as (

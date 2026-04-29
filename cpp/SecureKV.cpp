@@ -184,6 +184,31 @@ jsi::Value invoke_is_hardware_backed(
   });
 }
 
+const char* biometricStatusName(BiometricStatus s) {
+  switch (s) {
+    case BiometricStatus::Available: return "available";
+    case BiometricStatus::NoHardware: return "no_hardware";
+    case BiometricStatus::NotEnrolled: return "not_enrolled";
+    case BiometricStatus::HardwareUnavailable: return "hardware_unavailable";
+    case BiometricStatus::SecurityUpdateRequired: return "security_update_required";
+    case BiometricStatus::UnsupportedOs: return "unsupported_os";
+  }
+  return "hardware_unavailable";
+}
+
+jsi::Value invoke_biometric_status(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
+) {
+  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
+    try {
+      auto s = SecureKVBackend::biometricStatus();
+      return jsi::String::createFromUtf8(rt, biometricStatusName(s));
+    } catch (const std::exception& e) {
+      wrap(rt, "secure_kv_biometric_status", e);
+    }
+  });
+}
+
 }  // namespace
 
 void registerSecureKVMethods(MethodMap& map) {
@@ -194,6 +219,7 @@ void registerSecureKVMethods(MethodMap& map) {
   map.push_back({"secure_kv_list",               0, invoke_list});
   map.push_back({"secure_kv_clear",              0, invoke_clear});
   map.push_back({"secure_kv_is_hardware_backed", 0, invoke_is_hardware_backed});
+  map.push_back({"secure_kv_biometric_status",   0, invoke_biometric_status});
 }
 
 }  // namespace facebook::react::cryptolib

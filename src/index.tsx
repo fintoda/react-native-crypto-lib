@@ -21,7 +21,11 @@ export { ecc } from './ecc';
 export type { XOnlyTweakResult } from './ecc';
 export { tinySecp256k1 } from './tiny-secp256k1';
 export { secureKV } from './secureKV';
-export type { AccessControl, AccessControlOptions } from './secureKV';
+export type {
+  AccessControl,
+  AccessControlOptions,
+  BiometricStatus,
+} from './secureKV';
 export type {
   RecoverableSignature,
   RecoveryIdType,

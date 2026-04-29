@@ -25,6 +25,15 @@ export type AccessControlOptions =
  *  re-export for callers that read just the discriminator value. */
 export type AccessControl = AccessControlOptions['accessControl'];
 
+/** Snapshot of biometric availability — see [secureKV.biometricStatus]. */
+export type BiometricStatus =
+  | 'available'
+  | 'no_hardware'
+  | 'not_enrolled'
+  | 'hardware_unavailable'
+  | 'security_update_required'
+  | 'unsupported_os';
+
 const DEFAULT_AC: AccessControlOptions = { accessControl: 'none' };
 
 // --- generic blob slot (tag 0x00) ------------------------------------------
@@ -60,6 +69,11 @@ const clear = wrapNativeAsync(async (): Promise<void> => raw.secure_kv_clear());
 
 const isHardwareBacked = wrapNativeAsync(
   async (): Promise<boolean> => raw.secure_kv_is_hardware_backed()
+);
+
+const biometricStatus = wrapNativeAsync(
+  async (): Promise<BiometricStatus> =>
+    (await raw.secure_kv_biometric_status()) as BiometricStatus
 );
 
 // --- BIP-32 / SLIP-10 derivation slot (tag 0x01) ---------------------------
@@ -300,6 +314,7 @@ export const secureKV = {
   list,
   clear,
   isHardwareBacked,
+  biometricStatus,
 
   bip32: {
     setSeed: bip32_setSeed,

@@ -161,4 +161,23 @@ bool SecureKVBackend::isHardwareBacked() {
   }
 }
 
+BiometricStatus SecureKVBackend::biometricStatus() {
+  try {
+    auto cls = jni::findClassStatic(kBridge);
+    auto method = cls->getStaticMethod<jint()>("biometricStatusCode");
+    jint code = method(cls);
+    switch (code) {
+      case 0: return BiometricStatus::Available;
+      case 1: return BiometricStatus::NoHardware;
+      case 2: return BiometricStatus::NotEnrolled;
+      case 3: return BiometricStatus::HardwareUnavailable;
+      case 4: return BiometricStatus::SecurityUpdateRequired;
+      case 5: return BiometricStatus::UnsupportedOs;
+      default: return BiometricStatus::HardwareUnavailable;
+    }
+  } catch (const jni::JniException& e) {
+    rethrow(e);
+  }
+}
+
 }  // namespace facebook::react::cryptolib

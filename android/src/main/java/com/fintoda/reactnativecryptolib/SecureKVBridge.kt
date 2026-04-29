@@ -712,6 +712,33 @@ object SecureKVBridge {
     }
   }
 
+  /**
+   * Snapshot of biometric availability. Codes match
+   * `BiometricStatus` in cpp/SecureKVBackend.h:
+   *  - 0 Available
+   *  - 1 NoHardware
+   *  - 2 NotEnrolled
+   *  - 3 HardwareUnavailable
+   *  - 4 SecurityUpdateRequired
+   *  - 5 UnsupportedOs (API < 28)
+   * Does NOT acquire the process lock — it's safe to call from any
+   * process at any time, e.g. during app startup before the host has
+   * decided whether to even load the secureKV-using screen.
+   */
+  @JvmStatic
+  fun biometricStatusCode(): Int {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return 5
+    val bm = BiometricManager.from(appContext())
+    return when (bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)) {
+      BiometricManager.BIOMETRIC_SUCCESS -> 0
+      BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> 1
+      BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> 2
+      BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> 3
+      BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED -> 4
+      else -> 3
+    }
+  }
+
   @JvmStatic
   fun isHardwareBacked(): Boolean {
     assertSingleProcess()

@@ -263,6 +263,8 @@ export interface RawSpec {
   secure_kv_list(): Promise<string[]>;
   secure_kv_clear(): Promise<void>;
   secure_kv_is_hardware_backed(): Promise<boolean>;
+  /** Returns one of `BiometricStatus`'s enum values as a string. */
+  secure_kv_biometric_status(): Promise<string>;
 
   /**
    * Native-only signing on top of secureKV slots.
