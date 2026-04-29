@@ -551,6 +551,18 @@ the threat model is "attacker steals the unlocked device and tries to
 add their own biometric." Subsequent reads will fail with
 `SecureKVUnavailableError` and the app should treat the data as lost.
 
+> **iOS host-app setup:** any app that uses Face ID must declare
+> `NSFaceIDUsageDescription` in its `Info.plist`. Without this key the
+> OS hard-aborts the app the first time a Face-ID-protected Keychain
+> item is read (it does not surface as a Promise rejection — the
+> process is killed). Touch ID does not require this key, but adding
+> it is harmless and makes Face ID work on devices that have it. Add:
+>
+> ```xml
+> <key>NSFaceIDUsageDescription</key>
+> <string>Authenticate to use stored secrets.</string>
+> ```
+
 Android support is intentionally deferred: it requires plumbing the
 current `Activity` through to `BiometricPrompt`, plus a separate
 user-authentication-required Keystore master key. Provisioning a key
