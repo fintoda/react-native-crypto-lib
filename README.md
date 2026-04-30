@@ -26,6 +26,13 @@ OS-IO / Keychain boundary.
   work out of the box without a WASM build.
 - **WebCrypto `getRandomValues` polyfill** for packages that expect a
   browser-style `crypto` global (`@noble/*`, `uuid`, `ethers`, …).
+- **`secureKV`** — hardware-backed key/value storage (Keychain / Android
+  Keystore) with biometric gating, per-item passphrase wrap, encrypted
+  seed backup, and native-only signing (BIP-32 / Taproot / raw key
+  slots — secrets never re-enter JS).
+- **`biometric`** — standalone biometric prompt (Face ID / Touch ID /
+  Android `BiometricPrompt`) for UX gating outside the `secureKV`
+  flow.
 
 ## Requirements
 
@@ -93,7 +100,9 @@ underlying buffer; otherwise the wrapper makes one defensive slice.
 - [bip32](#bip32) — HD derivation (SLIP-10)
 - [slip39](#slip39) — Shamir secret sharing
 - [secureKV](#securekv) — hardware-backed key/value storage
+- [biometric](#biometric) — standalone biometric prompt
 - [webcrypto](#webcrypto) — getRandomValues polyfill
+- [Runtime tests](#runtime-tests) — on-device test vectors
 - [Compatibility notes](#compatibility-notes)
 
 ---
@@ -587,7 +596,18 @@ Format: `[0x03 slot tag][1B version][4B iters BE][16B salt][12B IV]
 [16B verifier][N ciphertext][16B GCM tag]`. The verifier is
 `HMAC-SHA256(hmac_key, "secureKV.passphrase.v1")[0..16]` — checked
 *before* AES-GCM, so a wrong passphrase fails fast and is
-distinguishable from data corruption.
+distinguishable from data corruption. The 16-byte compare is
+constant-time (`ctEquals` in `cpp/SecureKVPassphrase.cpp`) to avoid
+leaking partial-match info.
+
+> **Combining wrap with biometric.** When both `passphrase` and
+> `accessControl: 'biometric'` are set on an item, **both gates must
+> succeed to read** — they are stacked, not alternatives. The wrap
+> envelope sits *inside* the Keychain/Keystore-encrypted blob: the OS
+> decrypts the outer layer (after biometric prompt), then C++
+> unwraps the passphrase envelope. Wrong passphrase rejects with
+> `WrongPassphraseError` *after* the biometric prompt has already
+> been shown.
 
 ```ts
 import { secureKV, WrongPassphraseError } from '@fintoda/react-native-crypto-lib';
@@ -699,11 +719,10 @@ try {
 **Platform support.** Both iOS and Android, with one UX divergence
 worth flagging up front: **iOS prompts only on read; Android prompts on
 every encrypt or decrypt — including provisioning.** This is intrinsic
-to the platforms (Keystore symmetric keys with
+to the platforms — Keystore symmetric keys with
 `setUserAuthenticationRequired(true)` need biometric auth for both
 encrypt and decrypt, while iOS Keychain only evaluates the access
-control on read). Phase 3 will switch the Android path to a hybrid
-RSA-wrap-AES design so set is silent there too.
+control on read.
 
 **iOS.** The Keychain item is bound to
 `kSecAccessControlBiometryCurrentSet`, so re-enrolling biometrics
@@ -776,8 +795,10 @@ const sig4 = await secureKV.bip32.signEcdsa(...);  // prompts again
 ```
 
 `validityWindow: 0` (the default) keeps per-call prompting. iOS caps
-this internally at 600 seconds (Apple's
-`LATouchIDAuthenticationMaximumAllowableReuseDuration`); on Android,
+this internally at 300 seconds (Apple's
+`LATouchIDAuthenticationMaximumAllowableReuseDuration` — the system
+constant is 5 minutes; the library logs a warning and clamps any
+larger value); on Android,
 the OS enforces the window at the Keystore layer via
 `setUserAuthenticationParameters`. The window is baked into the item
 at provisioning — calling `set` again with a different
@@ -1101,10 +1122,68 @@ to avoid stomping on backup rules the host app may already have.
 - **A rooted / jailbroken device with active malware.** The OS will
   happily decrypt for any process running as your app's UID. Hardware
   protection prevents extraction of the master key, not its use.
-- **A future biometric / user-presence requirement.** Not in this
-  version — `set` / `get` proceed without prompting. The
-  `accessControl` parameter in the API is reserved for adding
-  biometric-gated reads later without breaking callers.
+- **A device with biometrics off and no passphrase wrap.** With
+  `accessControl: 'none'` and no `passphrase`, anyone holding the
+  unlocked device gets the bytes back. Layer in `passphrase` and / or
+  `'biometric'` to defend against that scenario.
+
+## biometric
+
+A standalone biometric prompt for UX gating outside the `secureKV`
+storage flow — e.g. confirming an action like opening a screen or
+sending a transaction without (yet) tying the prompt to a Keychain /
+Keystore operation.
+
+> ⚠️ **UX gate, not a security gate.** A successful return only means
+> the OS biometric prompt resolved. The bytes you act on after the
+> prompt still live in JS memory. For high-assurance flows where the
+> private key is what you want gated, use `secureKV.bip32.sign*` /
+> `secureKV.raw.sign*` with `accessControl: 'biometric'` — there the
+> Keystore / Keychain refuses to release key material until biometry
+> succeeds, and signing happens entirely in C++.
+
+```ts
+import { biometric, CryptoError } from '@fintoda/react-native-crypto-lib';
+```
+
+- `biometric.status()` → `Promise<BiometricStatus>`. Same enum as
+  `secureKV.biometricStatus()`. Use it to gate UI before showing a
+  "use Face ID" toggle.
+- `biometric.authenticate(options?)` → `Promise<void>`. Shows the
+  system prompt; resolves on success, rejects on cancel or failure.
+  `options` is `BiometricAuthenticateOptions = { title?, subtitle?,
+  cancelLabel? }` — same copy semantics as the `prompt` field on
+  `secureKV` calls (`title` is iOS-ignored unless `subtitle` is empty;
+  `subtitle` is `LAContext.localizedReason` on iOS).
+
+```ts
+try {
+  await biometric.authenticate({
+    subtitle: 'Confirm transaction',
+    cancelLabel: 'Cancel',
+  });
+  await sendTransaction(); // gated UX action
+} catch (e) {
+  if (e instanceof CryptoError && e.reason.startsWith('user canceled')) {
+    // user dismissed the prompt — silent abort, don't retry
+  } else {
+    throw e; // 'biometric failed: ...' — surface as needed
+  }
+}
+```
+
+Failure reasons:
+- `'user canceled: ...'` — user dismissed the prompt. Treat as a
+  silent abort, not as an error.
+- `'biometric failed: ...'` — hardware unavailable, lockout (too many
+  failed attempts), no enrolled biometrics, etc. Cross-check with
+  `biometric.status()` if the distinction matters.
+
+The same iOS host-app setup applies as for biometric `secureKV` items:
+`NSFaceIDUsageDescription` must be in `Info.plist` for Face ID, and on
+Android the host's `MainActivity` must inherit from `FragmentActivity`
+(RN's `ReactActivity` already does). See [Biometric
+gating](#biometric-gating) above for the full notes.
 
 ## webcrypto
 
@@ -1135,6 +1214,37 @@ import {
 import { installCryptoPolyfill } from '@fintoda/react-native-crypto-lib';
 installCryptoPolyfill();
 ```
+
+## Runtime tests
+
+Unit tests under `src/__tests__/` are JS-only — they exercise wrappers,
+error classification, and shape invariants. The cryptographic
+primitives themselves are verified against published test vectors on
+real hardware via the example app (`example/`), which acts as the
+runtime test harness.
+
+The example app's home screen is a menu of test groups (`hash`, `mac`,
+`kdf`, `rng`, `ecdsa`, `schnorr`, `ed25519 / x25519`, `aes`, `bip39`,
+`bip32`, `slip39`, `ecc / tiny-secp256k1`, `webcrypto`, `async ops vs
+sync`, `secureKV`, `secureKV signing`, `biometric`). Each group runs
+its cases sequentially with per-row pass / fail status. The two
+remaining entries — **Usage demos** and **Biometric (interactive)** —
+are hands-on flows; the latter exercises the live biometric prompt and
+needs taps.
+
+```sh
+yarn example start          # Metro
+yarn example ios            # iOS Simulator
+yarn example android        # Android device / emulator
+```
+
+Vectors come from authoritative sources: NIST FIPS 180-4 / 202 / SP
+800-38A, RFC 4231 / 5869 / 6979 / 7748 / 8032, BIP-32 / BIP-39 /
+BIP-86 / BIP-340 specs, SLIP-39 reference. Boundary and error paths
+(wrong passphrase → `WrongPassphraseError`, malformed envelope →
+`BackupFormatError`, slot kind mismatch → reject, etc.) are also
+covered. To add a new case: edit `example/src/tests/<domain>.ts`,
+which exports a `TestGroup` consumed by `example/src/MenuScreen.tsx`.
 
 ## Compatibility notes
 
