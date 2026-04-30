@@ -179,7 +179,6 @@ export default function Demo() {
 const styles = StyleSheet.create({
   container: {
     padding: 16,
-    paddingTop: 64,
     paddingBottom: 32,
   },
   header: {

@@ -1,179 +1,128 @@
-import { useEffect, useState } from 'react';
-import { ScrollView, Text, View, StyleSheet, Pressable } from 'react-native';
-import { runAllTests, type TestResult } from './testVectors';
+// Stack-style navigation without `react-navigation`: a single state machine
+// (`screen`, `groupId`) drives which view is rendered. Hardware back on
+// Android pops the stack to the menu.
+
+import { useCallback, useEffect, useState } from 'react';
+import { BackHandler, Pressable, StyleSheet, Text, View } from 'react-native';
+import MenuScreen from './MenuScreen';
+import TestGroupScreen from './TestGroupScreen';
 import Demo from './Demo';
 import Biometric from './Biometric';
+import { TEST_GROUPS, type TestGroup } from './tests';
 
-type Tab = 'tests' | 'demo' | 'biometric';
-
-function TestVectors() {
-  const [results, setResults] = useState<TestResult[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    runAllTests()
-      .then(setResults)
-      .catch((e: unknown) => setError(String(e)));
-  }, []);
-
-  const passed = results.filter((r) => r.pass).length;
-  const failed = results.filter((r) => !r.pass).length;
-  const total = results.length;
-
-  return (
-    <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.header}>Crypto Test Vectors</Text>
-
-      {error && <Text style={styles.error}>Fatal: {error}</Text>}
-
-      {total > 0 && (
-        <Text style={[styles.summary, failed > 0 ? styles.fail : styles.pass]}>
-          {failed === 0
-            ? `ALL ${total} PASSED`
-            : `${passed}/${total} passed, ${failed} FAILED`}
-        </Text>
-      )}
-
-      {results.map((r, i) => (
-        <View key={i} style={styles.row}>
-          <Text style={r.pass ? styles.pass : styles.fail}>
-            {r.pass ? 'PASS' : 'FAIL'}
-          </Text>
-          <View style={styles.info}>
-            <Text style={styles.name}>{r.name}</Text>
-            {r.detail && <Text style={styles.detail}>{r.detail}</Text>}
-          </View>
-        </View>
-      ))}
-    </ScrollView>
-  );
-}
+type Screen =
+  | { name: 'menu' }
+  | { name: 'group'; groupId: string }
+  | { name: 'demo' }
+  | { name: 'biometric' };
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('tests');
+  const [screen, setScreen] = useState<Screen>({ name: 'menu' });
 
+  const goHome = useCallback(() => setScreen({ name: 'menu' }), []);
+
+  // Android hardware back: pop to the menu when we're not already there.
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (screen.name === 'menu') return false;
+      goHome();
+      return true;
+    });
+    return () => sub.remove();
+  }, [screen.name, goHome]);
+
+  if (screen.name === 'menu') {
+    return (
+      <MenuScreen
+        onSelect={(id) => {
+          if (id === 'demo') {
+            setScreen({ name: 'demo' });
+            return;
+          }
+          if (id === 'biometric') {
+            setScreen({ name: 'biometric' });
+            return;
+          }
+          setScreen({ name: 'group', groupId: id });
+        }}
+      />
+    );
+  }
+
+  if (screen.name === 'demo') {
+    return (
+      <ScreenWithBack title="Usage demos" onBack={goHome}>
+        <Demo />
+      </ScreenWithBack>
+    );
+  }
+
+  if (screen.name === 'biometric') {
+    return (
+      <ScreenWithBack title="Biometric (interactive)" onBack={goHome}>
+        <Biometric />
+      </ScreenWithBack>
+    );
+  }
+
+  // group
+  const group: TestGroup | undefined = TEST_GROUPS.find(
+    (g) => g.id === screen.groupId
+  );
+  if (!group) {
+    return (
+      <ScreenWithBack title="Unknown" onBack={goHome}>
+        <View style={styles.fallback}>
+          <Text>Unknown group: {screen.groupId}</Text>
+        </View>
+      </ScreenWithBack>
+    );
+  }
+  return <TestGroupScreen group={group} onBack={goHome} />;
+}
+
+function ScreenWithBack({
+  title,
+  onBack,
+  children,
+}: {
+  title: string;
+  onBack: () => void;
+  children: React.ReactNode;
+}) {
   return (
     <View style={styles.container}>
-      <View style={styles.tabs}>
-        <Pressable
-          style={[styles.tab, tab === 'tests' && styles.activeTab]}
-          onPress={() => setTab('tests')}
-        >
-          <Text
-            style={[styles.tabText, tab === 'tests' && styles.activeTabText]}
-          >
-            Test Vectors
-          </Text>
+      <View style={styles.header}>
+        <Pressable style={styles.back} onPress={onBack}>
+          <Text style={styles.backText}>‹ Back</Text>
         </Pressable>
-        <Pressable
-          style={[styles.tab, tab === 'demo' && styles.activeTab]}
-          onPress={() => setTab('demo')}
-        >
-          <Text
-            style={[styles.tabText, tab === 'demo' && styles.activeTabText]}
-          >
-            Usage Demo
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.tab, tab === 'biometric' && styles.activeTab]}
-          onPress={() => setTab('biometric')}
-        >
-          <Text
-            style={[
-              styles.tabText,
-              tab === 'biometric' && styles.activeTabText,
-            ]}
-          >
-            Biometric
-          </Text>
-        </Pressable>
+        <Text style={styles.headerTitle}>{title}</Text>
+        <View style={styles.spacer} />
       </View>
-
-      {tab === 'tests' && <TestVectors />}
-      {tab === 'demo' && <Demo />}
-      {tab === 'biometric' && <Biometric />}
+      <View style={styles.body}>{children}</View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingTop: 54,
-  },
-  tabs: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  activeTab: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#007AFF',
-  },
-  tabText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#888',
-  },
-  activeTabText: {
-    color: '#007AFF',
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 32,
-  },
+  container: { flex: 1, paddingTop: 54 },
   header: {
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 12,
-  },
-  summary: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 16,
-    padding: 8,
-    borderRadius: 6,
-    overflow: 'hidden',
-    textAlign: 'center',
-  },
-  error: {
-    color: '#c00',
-    fontSize: 14,
-    marginBottom: 12,
-  },
-  row: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 6,
-    gap: 8,
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
-  info: {
+  back: { paddingVertical: 4, paddingHorizontal: 4 },
+  backText: { color: '#007AFF', fontSize: 16, fontWeight: '500' },
+  headerTitle: {
     flex: 1,
-  },
-  name: {
-    fontSize: 12,
-    fontFamily: 'Courier',
-  },
-  detail: {
-    fontSize: 10,
-    fontFamily: 'Courier',
-    color: '#888',
-    marginTop: 2,
-  },
-  pass: {
-    color: '#2a2',
+    textAlign: 'center',
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 16,
   },
-  fail: {
-    color: '#c00',
-    fontWeight: '700',
-    fontSize: 12,
-  },
+  spacer: { width: 60 },
+  body: { flex: 1 },
+  fallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 });
