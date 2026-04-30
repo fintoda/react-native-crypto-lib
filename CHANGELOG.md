@@ -34,10 +34,9 @@ and this project adheres to [Conventional Commits](https://www.conventionalcommi
     (e.g. `bip39.toSeedSync(mnemonic)`).
 - iOS `BiometricBackend::authenticate` now times out after 120 s
   instead of waiting forever (mirrors the Android cap).
-- Android secureKV biometric blob format gained a v2 variant with a
-  plaintext key prefix so `secureKV.list()` can enumerate biometric
-  entries without prompting. Legacy v1 blobs continue to read but
-  are skipped from `list()`.
+- Android secureKV biometric blob format carries a plaintext key
+  prefix in the header so `secureKV.list()` can enumerate biometric
+  entries without prompting.
 
 ## [0.9.0] - 2026-04-12
 

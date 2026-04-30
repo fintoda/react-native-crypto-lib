@@ -66,24 +66,15 @@ class SecureKVBiometricException(msg: String) : RuntimeException(msg)
  *   a successful biometric prompt via `BiometricPrompt(CryptoObject)`.
  *
  * Blob format on disk. The leading variant byte both identifies the
- * access-control kind and pins the on-disk layout — old layouts are
- * kept readable for backward compat.
+ * access-control kind and pins the on-disk layout.
  *
  *   Non-biometric (variant=0):
  *     [ 1 byte variant=0    ]
  *     [ 12 bytes IV         ]
  *     [ ciphertext + 16-byte GCM tag ] ← AES-GCM(plain)
  *
- *   Biometric v1 (variant=1, LEGACY, pre-0.10.0 — read-only):
+ *   Biometric (variant=1):
  *     [ 1 byte variant=1    ]
- *     [ 4 bytes window BE   ]
- *     [ 12 bytes IV         ]
- *     [ ciphertext + 16-byte GCM tag ]
- *   listJoined() can't surface their names without prompting and
- *   silently omits them; rewrite via set() to upgrade to v2.
- *
- *   Biometric v2 (variant=2, current — new writes always use this):
- *     [ 1 byte variant=2    ]
  *     [ 4 bytes window BE   ]
  *     [ 2 bytes keyLen BE   ]
  *     [ keyLen bytes UTF-8 key ]   ← plaintext, lets list() enumerate
@@ -92,9 +83,6 @@ class SecureKVBiometricException(msg: String) : RuntimeException(msg)
  *
  * The variant byte is plaintext so we can route a read to the correct
  * master key (and so we know to prompt) before any biometric eval.
- * Distinct variant values for v1/v2 means parseBlob can never confuse
- * a random IV byte for a v2 keyLen field — a real concern if v1 and
- * v2 shared the same variant byte.
  *
  * Plaintext encodes the original key alongside the value so list() can
  * recover the user-facing key names without a separate index file:
@@ -125,40 +113,28 @@ object SecureKVBridge {
   // Biometric blobs additionally carry a 4-byte BE window (seconds)
   // immediately after the variant byte. Non-biometric blobs do not.
   private const val WINDOW_LEN = 4
-  // Biometric blob format v2 (introduced in 0.10.0) also carries a
-  // 2-byte BE plaintext key length + the UTF-8 key bytes immediately
-  // after the window. This lets `list()` enumerate biometric items
-  // without prompting per blob (the encrypted plaintext also carries a
-  // copy of the key for tamper-detection — see decodePlain). Legacy
-  // v1 blobs (no plaintext key prefix) are detected by length and
-  // remain readable but invisible to `list()` until rewritten.
+  // Biometric blobs carry a 2-byte BE plaintext key length + the UTF-8
+  // key bytes immediately after the window. This lets `list()` enumerate
+  // biometric items without prompting per blob (the encrypted plaintext
+  // also carries a copy of the key for tamper-detection — see decodePlain).
   private const val KEY_PREFIX_LEN_LEN = 2
   // Practical cap mirroring the JSI-side validation; the actual cap
   // is enforced by requireValidKey() in cpp/SecureKVCommon.h.
   private const val KEY_PREFIX_MAX = 1024
 
   // Mirrors cpp/SecureKVBackend.h's AccessControl enum used at the
-  // C++/JNI boundary. The blob's leading byte ALSO uses 0/1 for legacy
-  // (v1) blobs, but new writes use BLOB_VARIANT_BIOMETRIC_V2 (=2) for
-  // biometric items so list() can extract the plaintext key prefix
-  // without confusing v1 IV bytes for a v2 keyLen field.
+  // C++/JNI boundary. The on-disk blob's leading byte uses the same
+  // numeric values, so AccessControl and BLOB_VARIANT_* are kept in sync.
   private const val ACCESS_CONTROL_NONE: Int = 0
   private const val ACCESS_CONTROL_BIOMETRIC: Int = 1
 
-  // On-disk blob variants. Differs from AccessControl: the variant byte
-  // identifies BOTH the access-control kind and the on-disk layout.
+  // On-disk blob variants — kept identical to the AccessControl values
+  // above so the read path can map disk → access-control with no extra
+  // table.
   // - 0 = non-biometric (no prompt, no plaintext header)
-  // - 1 = biometric v1 (LEGACY, pre-0.10.0): [variant][window][IV][cipher]
-  //       Pre-0.10.0 wrote these. Read-only for backward compat — list()
-  //       can't surface their names because the key lives only in the
-  //       encrypted plaintext. Hosts that need names must rewrite via
-  //       set() to upgrade to v2.
-  // - 2 = biometric v2 (current): adds [keyLen][key UTF-8] to the header
-  //       so list() can enumerate without prompting. New writes always
-  //       emit this.
+  // - 1 = biometric: [variant][window 4B][keyLen 2B][key UTF-8][IV][cipher+tag]
   private const val BLOB_VARIANT_NONE: Int = 0
-  private const val BLOB_VARIANT_BIOMETRIC_V1: Int = 1
-  private const val BLOB_VARIANT_BIOMETRIC_V2: Int = 2
+  private const val BLOB_VARIANT_BIOMETRIC: Int = 1
 
   // BiometricPrompt show + wait timeout. The OS will dismiss after its own
   // inactivity policy long before this fires; this is the absolute backstop
@@ -865,16 +841,14 @@ object SecureKVBridge {
 
   private data class ParsedBlob(
     // The AccessControl value (0 = none, 1 = biometric) that the read
-    // path needs in order to pick the right master key. The on-disk
-    // variant byte may be 0/1/2 (we collapse v1+v2 biometric back to
-    // ACCESS_CONTROL_BIOMETRIC here) — callers shouldn't care which
-    // disk format was used, only what gating to apply.
+    // path needs in order to pick the right master key. Same numeric
+    // value as the on-disk variant byte (the two enums are kept in sync).
     val accessControl: Int,
     val validityWindowSec: Int,  // 0 for non-biometric
     val iv: ByteArray,
     val sealed: ByteArray,
-    // v2 biometric blobs only — null for v1 / non-biometric. list()
-    // surfaces this name without prompting; v1 blobs are skipped.
+    // Biometric blobs only — null for non-biometric. list() surfaces
+    // this name without prompting.
     val plaintextKey: String?
   )
 
@@ -887,8 +861,6 @@ object SecureKVBridge {
       BLOB_VARIANT_NONE -> {
         val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
         val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
-        // Map disk variant back to the access-control value the rest of
-        // the bridge expects (BLOB_VARIANT_NONE == ACCESS_CONTROL_NONE).
         return ParsedBlob(
           accessControl = ACCESS_CONTROL_NONE,
           validityWindowSec = 0,
@@ -897,35 +869,13 @@ object SecureKVBridge {
           plaintextKey = null
         )
       }
-      BLOB_VARIANT_BIOMETRIC_V1 -> {
-        // Legacy: [variant][window 4B][IV 12B][cipher+tag]
-        val minLen = VARIANT_LEN + WINDOW_LEN + IV_LEN + TAG_BITS / 8
-        if (blob.size < minLen) {
-          throw SecureKVUnavailableException(
-            "unavailable: biometric v1 blob truncated"
-          )
-        }
-        val window = readBeU32(blob, 1)
-        val iv = blob.copyOfRange(
-          VARIANT_LEN + WINDOW_LEN, VARIANT_LEN + WINDOW_LEN + IV_LEN
-        )
-        val sealed = blob.copyOfRange(VARIANT_LEN + WINDOW_LEN + IV_LEN, blob.size)
-        return ParsedBlob(
-          accessControl = ACCESS_CONTROL_BIOMETRIC,
-          validityWindowSec = window,
-          iv = iv,
-          sealed = sealed,
-          // v1 has no plaintext key — list() skips these.
-          plaintextKey = null
-        )
-      }
-      BLOB_VARIANT_BIOMETRIC_V2 -> {
+      BLOB_VARIANT_BIOMETRIC -> {
         // [variant][window 4B][keyLen 2B BE][key UTF-8][IV 12B][cipher+tag]
         val minLen =
           VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + IV_LEN + TAG_BITS / 8
         if (blob.size < minLen) {
           throw SecureKVUnavailableException(
-            "unavailable: biometric v2 blob truncated"
+            "unavailable: biometric blob truncated"
           )
         }
         val window = readBeU32(blob, 1)
@@ -934,14 +884,14 @@ object SecureKVBridge {
             (blob[VARIANT_LEN + WINDOW_LEN + 1].toInt() and 0xff)
         if (keyLen < 1 || keyLen > KEY_PREFIX_MAX) {
           throw SecureKVUnavailableException(
-            "unavailable: biometric v2 keyLen out of range ($keyLen)"
+            "unavailable: biometric keyLen out of range ($keyLen)"
           )
         }
         val keyStart = VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN
         val ivStart = keyStart + keyLen
         if (blob.size < ivStart + IV_LEN + TAG_BITS / 8) {
           throw SecureKVUnavailableException(
-            "unavailable: biometric v2 blob too short for declared keyLen"
+            "unavailable: biometric blob too short for declared keyLen"
           )
         }
         val plaintextKey =
@@ -1159,11 +1109,10 @@ object SecureKVBridge {
           VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + (keyBytes?.size ?: 0)
         else VARIANT_LEN
       val out = ByteArray(headerLen + iv.size + sealed.size)
-      // Disk variant is decoupled from accessControl: BIOMETRIC writes
-      // always use V2 (with the plaintext key prefix) so list() can
-      // enumerate without prompting. V1 is read-only legacy.
+      // Variant byte == AccessControl value: 0 for non-biometric,
+      // 1 for biometric.
       out[0] = if (accessControl == ACCESS_CONTROL_BIOMETRIC)
-        BLOB_VARIANT_BIOMETRIC_V2.toByte()
+        BLOB_VARIANT_BIOMETRIC.toByte()
       else
         BLOB_VARIANT_NONE.toByte()
       if (accessControl == ACCESS_CONTROL_BIOMETRIC && keyBytes != null) {
@@ -1275,12 +1224,8 @@ object SecureKVBridge {
    *
    * - Non-biometric blobs decrypt without auth (the master key has no
    *   user-auth gate); the key name comes from the encrypted plaintext.
-   * - Biometric blobs (v2 format, written by 0.10.0+) carry the key
-   *   name in the plaintext header so `list()` does not have to prompt
-   *   per blob. v1 biometric blobs (pre-0.10.0) had no plaintext key
-   *   prefix — those are silently skipped because reading them would
-   *   require N biometric prompts. Hosts that need full enumeration of
-   *   pre-0.10.0 biometric items must rewrite via `set()`.
+   * - Biometric blobs carry the key name in the plaintext header so
+   *   `list()` does not prompt per blob.
    *
    * Two error classes are still distinguished:
    *   - master-key invalidation (KeyPermanentlyInvalidatedException,
@@ -1344,7 +1289,7 @@ object SecureKVBridge {
             catch (_: BadPaddingException) { null }
           plain?.let { decodePlain(it).first }
         }
-        BLOB_VARIANT_BIOMETRIC_V2 -> {
+        BLOB_VARIANT_BIOMETRIC -> {
           // Plaintext key prefix lets us enumerate without touching
           // Keystore or prompting. parseBlob enforces the length range.
           val parsed = try {
@@ -1353,11 +1298,6 @@ object SecureKVBridge {
             null
           }
           parsed?.plaintextKey
-        }
-        BLOB_VARIANT_BIOMETRIC_V1 -> {
-          // Legacy: name lives only inside the encrypted plaintext.
-          // Reading it would trigger a biometric prompt per blob; skip.
-          null
         }
         else -> null
       }
