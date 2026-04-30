@@ -64,6 +64,93 @@ jsi::Value invoke_pbkdf2_sha512(
   return wrapDigest(rt, std::move(out));
 }
 
+// --- async variants -----------------------------------------------------
+// PBKDF2 with high iteration counts (100k+) blocks the JS thread for tens
+// to hundreds of ms; default API is async. The *_sync thunks above remain
+// for callers that explicitly opt into sync via `pbkdf2_sha{256,512}Sync`.
+
+jsi::Value invoke_pbkdf2_sha256_async(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    auto passBuf =
+      requireArrayBufferAt(rt, "kdf_pbkdf2_sha256_async", "password", args, count, 0);
+    auto saltBuf =
+      requireArrayBufferAt(rt, "kdf_pbkdf2_sha256_async", "salt", args, count, 1);
+    if (passBuf.size(rt) > INT_MAX) {
+      throw jsi::JSError(rt, "kdf_pbkdf2_sha256_async: password too large");
+    }
+    if (saltBuf.size(rt) > INT_MAX) {
+      throw jsi::JSError(rt, "kdf_pbkdf2_sha256_async: salt too large");
+    }
+    uint32_t iters = static_cast<uint32_t>(requireIntAt(
+      rt, "kdf_pbkdf2_sha256_async", "iterations", args, count, 2, 1, kKdfMaxIterations));
+    int outlen = static_cast<int>(requireIntAt(
+      rt, "kdf_pbkdf2_sha256_async", "length", args, count, 3, 1, kKdfMaxOutLen));
+
+    // Copy ArrayBuffer bytes on the JS thread; the worker can't touch
+    // jsi::Runtime, so we move the std::vector through the lambda.
+    std::vector<uint8_t> pass(
+      passBuf.data(rt), passBuf.data(rt) + passBuf.size(rt));
+    std::vector<uint8_t> salt(
+      saltBuf.data(rt), saltBuf.data(rt) + saltBuf.size(rt));
+
+    return makePromiseAsync<std::vector<uint8_t>>(
+      rt, "kdf_pbkdf2_sha256",
+      [pass = std::move(pass), salt = std::move(salt), iters, outlen]()
+          -> std::vector<uint8_t> {
+        std::vector<uint8_t> out(outlen);
+        pbkdf2_hmac_sha256(pass.data(), static_cast<int>(pass.size()),
+                           salt.data(), static_cast<int>(salt.size()),
+                           iters, out.data(), outlen);
+        return out;
+      },
+      [](jsi::Runtime& rt, std::vector<uint8_t>&& out) -> jsi::Value {
+        return wrapDigest(rt, std::move(out));
+      });
+  });
+}
+
+jsi::Value invoke_pbkdf2_sha512_async(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    auto passBuf =
+      requireArrayBufferAt(rt, "kdf_pbkdf2_sha512_async", "password", args, count, 0);
+    auto saltBuf =
+      requireArrayBufferAt(rt, "kdf_pbkdf2_sha512_async", "salt", args, count, 1);
+    if (passBuf.size(rt) > INT_MAX) {
+      throw jsi::JSError(rt, "kdf_pbkdf2_sha512_async: password too large");
+    }
+    if (saltBuf.size(rt) > INT_MAX) {
+      throw jsi::JSError(rt, "kdf_pbkdf2_sha512_async: salt too large");
+    }
+    uint32_t iters = static_cast<uint32_t>(requireIntAt(
+      rt, "kdf_pbkdf2_sha512_async", "iterations", args, count, 2, 1, kKdfMaxIterations));
+    int outlen = static_cast<int>(requireIntAt(
+      rt, "kdf_pbkdf2_sha512_async", "length", args, count, 3, 1, kKdfMaxOutLen));
+
+    std::vector<uint8_t> pass(
+      passBuf.data(rt), passBuf.data(rt) + passBuf.size(rt));
+    std::vector<uint8_t> salt(
+      saltBuf.data(rt), saltBuf.data(rt) + saltBuf.size(rt));
+
+    return makePromiseAsync<std::vector<uint8_t>>(
+      rt, "kdf_pbkdf2_sha512",
+      [pass = std::move(pass), salt = std::move(salt), iters, outlen]()
+          -> std::vector<uint8_t> {
+        std::vector<uint8_t> out(outlen);
+        pbkdf2_hmac_sha512(pass.data(), static_cast<int>(pass.size()),
+                           salt.data(), static_cast<int>(salt.size()),
+                           iters, out.data(), outlen);
+        return out;
+      },
+      [](jsi::Runtime& rt, std::vector<uint8_t>&& out) -> jsi::Value {
+        return wrapDigest(rt, std::move(out));
+      });
+  });
+}
+
 // HKDF (RFC 5869) — trezor-crypto doesn't ship HKDF, so we build it on
 // top of its hmac_sha{256,512} primitives.
 template <
@@ -167,10 +254,12 @@ jsi::Value invoke_hkdf_sha512(
 } // namespace
 
 void registerKdfMethods(MethodMap& map) {
-  map.push_back({"kdf_pbkdf2_sha256", 4, invoke_pbkdf2_sha256});
-  map.push_back({"kdf_pbkdf2_sha512", 4, invoke_pbkdf2_sha512});
-  map.push_back({"kdf_hkdf_sha256",   4, invoke_hkdf_sha256});
-  map.push_back({"kdf_hkdf_sha512",   4, invoke_hkdf_sha512});
+  map.push_back({"kdf_pbkdf2_sha256",       4, invoke_pbkdf2_sha256});
+  map.push_back({"kdf_pbkdf2_sha512",       4, invoke_pbkdf2_sha512});
+  map.push_back({"kdf_pbkdf2_sha256_async", 4, invoke_pbkdf2_sha256_async});
+  map.push_back({"kdf_pbkdf2_sha512_async", 4, invoke_pbkdf2_sha512_async});
+  map.push_back({"kdf_hkdf_sha256",         4, invoke_hkdf_sha256});
+  map.push_back({"kdf_hkdf_sha512",         4, invoke_hkdf_sha512});
 }
 
 }

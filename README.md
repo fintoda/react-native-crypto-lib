@@ -65,7 +65,7 @@ installCryptoPolyfill();
 
 // BIP-39 → BIP-32 → ECDSA signing:
 const mnemonic = bip39.generate(128);
-const seed = bip39.toSeed(mnemonic, '');
+const seed = await bip39.toSeed(mnemonic, '');
 const root = bip32.fromSeed(seed, 'secp256k1');
 const leaf = bip32.derive(root, "m/44'/0'/0'/0/0");
 
@@ -143,10 +143,18 @@ import { mac } from '@fintoda/react-native-crypto-lib';
 import { kdf } from '@fintoda/react-native-crypto-lib';
 ```
 
-- `kdf.pbkdf2_sha256(password, salt, iterations, length)` → `Uint8Array(length)`
-- `kdf.pbkdf2_sha512(password, salt, iterations, length)` → `Uint8Array(length)`
+- `kdf.pbkdf2_sha256(password, salt, iterations, length)` → `Promise<Uint8Array(length)>`
+- `kdf.pbkdf2_sha512(password, salt, iterations, length)` → `Promise<Uint8Array(length)>`
+- `kdf.pbkdf2_sha256Sync(password, salt, iterations, length)` → `Uint8Array(length)`
+- `kdf.pbkdf2_sha512Sync(password, salt, iterations, length)` → `Uint8Array(length)`
 - `kdf.hkdf_sha256(ikm, salt, info, length)` → `Uint8Array(length)`
 - `kdf.hkdf_sha512(ikm, salt, info, length)` → `Uint8Array(length)`
+
+PBKDF2 derivation runs on a worker thread by default — large iteration
+counts (100k+) can take tens to hundreds of milliseconds and would
+otherwise drop frames. Use the `*Sync` variants only when a Promise is
+inconvenient and the iteration count is small. HKDF stays synchronous;
+extract+expand is sub-millisecond even at the maximum output length.
 
 `length` is capped at `255 * hashLen` per RFC 5869 / the PBKDF2 reference
 impl. `iterations` is capped at 10,000,000 as a sanity check.
@@ -327,8 +335,11 @@ import { bip39, type Bip39Strength } from '@fintoda/react-native-crypto-lib';
   16, 20, 24, 28 or 32 bytes.
 - `bip39.validate(mnemonic)` → `boolean`. Verifies the checksum and
   wordlist membership.
-- `bip39.toSeed(mnemonic, passphrase = '')` → `Uint8Array(64)`.
+- `bip39.toSeed(mnemonic, passphrase = '')` → `Promise<Uint8Array(64)>`.
   PBKDF2-HMAC-SHA512, 2048 rounds, salt = `"mnemonic" + passphrase`.
+  Runs on a worker thread (~10–50 ms on phones).
+- `bip39.toSeedSync(mnemonic, passphrase = '')` → `Uint8Array(64)`.
+  Synchronous variant — blocks the JS thread for the full PBKDF2 run.
 
 ## bip32
 
@@ -396,10 +407,10 @@ import { slip39, type Slip39Group } from '@fintoda/react-native-crypto-lib';
 ```ts
 const secret = new Uint8Array(16); // 16–32 bytes, even length
 // Split into 5 shares, any 3 recover the secret
-const shares: string[] = slip39.generate(secret, 'passphrase', 3, 5);
+const shares: string[] = await slip39.generate(secret, 'passphrase', 3, 5);
 
 // Recover from any 3 shares
-const recovered: Uint8Array = slip39.combine(
+const recovered: Uint8Array = await slip39.combine(
   [shares[0], shares[2], shares[4]],
   'passphrase',
 );
@@ -409,14 +420,19 @@ const recovered: Uint8Array = slip39.combine(
 
 ```ts
 // 2-of-3 groups; each group has its own member threshold
-const groups: string[][] = slip39.generateGroups(secret, 'passphrase', 2, [
-  { threshold: 2, count: 3 }, // group 0: 2-of-3
-  { threshold: 3, count: 5 }, // group 1: 3-of-5
-  { threshold: 1, count: 1 }, // group 2: 1-of-1 (backup)
-]);
+const groups: string[][] = await slip39.generateGroups(
+  secret,
+  'passphrase',
+  2,
+  [
+    { threshold: 2, count: 3 }, // group 0: 2-of-3
+    { threshold: 3, count: 5 }, // group 1: 3-of-5
+    { threshold: 1, count: 1 }, // group 2: 1-of-1 (backup)
+  ],
+);
 
 // Recover with shares from 2 groups
-const recovered = slip39.combine(
+const recovered = await slip39.combine(
   [...groups[0].slice(0, 2), groups[2][0]],
   'passphrase',
 );
@@ -424,16 +440,24 @@ const recovered = slip39.combine(
 
 ### API
 
-- `slip39.generate(masterSecret, passphrase?, threshold, shareCount, iterationExponent? = 1)` → `string[]`.
+The PBKDF2 + Feistel pipeline can take 50–200 ms on real devices, so
+the main entry points return promises and run on a worker thread.
+`*Sync` variants do the same work on the JS thread for callers that
+prefer synchronous returns.
+
+- `slip39.generate(masterSecret, passphrase?, threshold, shareCount, iterationExponent? = 1)` → `Promise<string[]>`.
   Returns `shareCount` SLIP-39 mnemonics. `masterSecret` must be 16–32
   bytes (even). Passphrase encrypts the secret via a 4-round Feistel
   cipher with PBKDF2-HMAC-SHA256 (10 000 × 2^exp iterations per round).
-- `slip39.generateGroups(masterSecret, passphrase?, groupThreshold, groups, iterationExponent? = 1)` → `string[][]`.
+- `slip39.generateSync(...)` → `string[]` — synchronous variant.
+- `slip39.generateGroups(masterSecret, passphrase?, groupThreshold, groups, iterationExponent? = 1)` → `Promise<string[][]>`.
   Two-level Shamir: `groups` is an array of `{ threshold, count }`.
-- `slip39.combine(mnemonics, passphrase?)` → `Uint8Array`.
+- `slip39.generateGroupsSync(...)` → `string[][]` — synchronous variant.
+- `slip39.combine(mnemonics, passphrase?)` → `Promise<Uint8Array>`.
   Recover the master secret from enough shares (single or multi-group).
+- `slip39.combineSync(mnemonics, passphrase?)` → `Uint8Array` — synchronous variant.
 - `slip39.validateMnemonic(mnemonic)` → `boolean`.
-  Wordlist + RS1024 checksum validation.
+  Wordlist + RS1024 checksum validation. Sync — sub-millisecond.
 
 ## secureKV
 
@@ -534,7 +558,7 @@ just hands the key material back to the C++ crypto path.
 
 ```ts
 // Provision once. The seed never re-enters JS.
-const seed = bip39.toSeed(mnemonic);
+const seed = await bip39.toSeed(mnemonic);
 await secureKV.bip32.setSeed('wallet', seed, { accessControl: 'biometric' });
 seed.fill(0);
 
@@ -659,7 +683,7 @@ Two slot families coexist with the generic blob slot:
 ```ts
 // Once at provisioning. The 64-byte seed is in JS for one call,
 // then never again (you should overwrite the seed Uint8Array yourself).
-const seed = bip39.toSeed(mnemonic);
+const seed = await bip39.toSeed(mnemonic);
 await secureKV.bip32.setSeed('wallet', seed);
 seed.fill(0);
 
@@ -688,7 +712,7 @@ const sig2 = await secureKV.raw.signEcdsa('imported', digest);
 #### `secureKV.bip32` — BIP-32 / SLIP-10 derivation on a stored seed
 
 `setSeed(alias, seed)` accepts a BIP-32 seed of 16 to 64 bytes — the
-BIP-32 spec range. Most callers will pass `bip39.toSeed(mnemonic)` (64
+BIP-32 spec range. Most callers will pass `await bip39.toSeed(mnemonic)` (64
 bytes), but raw entropy (e.g. the BIP-32 reference vectors at 16 bytes)
 also works. Every read method derives a child key on the fly using
 trezor-crypto's BIP-32 / SLIP-10 implementation. `path` is either a

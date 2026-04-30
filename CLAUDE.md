@@ -3,7 +3,12 @@
 ## Project overview
 
 `@fintoda/react-native-crypto-lib` — cryptography library for React Native.
-C++ Turbo Module (JSI) over vendored trezor-crypto. Synchronous, zero-copy ArrayBuffer API.
+C++ Turbo Module (JSI) over vendored trezor-crypto. Zero-copy ArrayBuffer
+API. Most primitives are synchronous; long-running ones (PBKDF2,
+`bip39.toSeed`, `slip39.{generate,generateGroups,combine}`, every
+`secureKV.*` and `biometric.*` call) are Promise-returning and run on
+worker threads via `makePromiseAsync` (`cpp/Common.h`). Each async
+domain also exposes a `*Sync` escape hatch.
 
 ## Tooling
 
@@ -40,6 +45,23 @@ Every crypto domain follows the same pattern:
 - Packed structs across JSI: `ArrayBuffer` of uint8 pairs (groups in slip39_generate_groups)
 - Return arrays/nested arrays from C++: construct `jsi::Array` directly
 
+### Async dispatch (heavy ops + secureKV)
+
+- Three phases: Phase 1 validates JSI args on the JS thread (synchronous
+  `jsi::JSError` throws from validation surface as Promise rejections via
+  `safeAsyncThunk`), Phase 2 runs the actual work on a worker via
+  `makePromiseAsync<BgResult>` (no `jsi::Runtime` access — capture inputs
+  by value), Phase 3 wraps the result back into a `jsi::Value` on the JS
+  thread.
+- Worker-thread helpers throw `std::runtime_error("reason")`; callers
+  prepend `"<op>: "` so error messages match the sync wrappers' format.
+- The sync and async variants of an operation share the same C++ helper
+  function (e.g. `doSlip39Generate`) so behaviour is identical between
+  the two paths.
+- TS API convention: heavy ops expose the async variant under the
+  unsuffixed name (`bip39.toSeed`, `slip39.generate`) and the sync
+  variant under the `*Sync` suffix.
+
 ### Vendor (trezor-crypto)
 
 Vendored at `vendor/trezor-crypto/crypto/`. Only explicitly listed sources are compiled — the directory contains many more files (cardano, monero, nem, chacha20, noise, etc.) that are intentionally excluded. To use a new vendor module: add its `.c` file to both build manifests and `#include` its header with `extern "C" {}`.
@@ -47,15 +69,22 @@ Vendored at `vendor/trezor-crypto/crypto/`. Only explicitly listed sources are c
 ## Adding a new crypto domain (checklist)
 
 1. Create `cpp/<Domain>.cpp` with `namespace facebook::react::cryptolib`
-2. Implement JSI thunks: `jsi::Value invoke_<method>(jsi::Runtime&, TurboModule&, const jsi::Value*, size_t)`
+2. Implement JSI thunks: `jsi::Value invoke_<method>(jsi::Runtime&, TurboModule&, const jsi::Value*, size_t)`.
+   For sync ops, the body validates args and returns a `jsi::Value`
+   directly. For async ops, wrap the body in `safeAsyncThunk(rt, [&]{ ... })`
+   and return `makePromiseAsync<BgResult>(rt, "<op>", bgWork, finishWork)` —
+   factor the heavy work into a helper that takes only POD/STL inputs so
+   sync and async paths can share it.
 3. Add `void register<Domain>Methods(MethodMap& map)` registration function
 4. Declare it in `cpp/Common.h`
 5. Call it in `cpp/ReactNativeCryptoLibImpl.cpp` constructor
 6. Add any new vendor `.c` to `android/CMakeLists.txt` (TREZOR_CRYPTO_SOURCES) AND `ReactNativeCryptoLib.podspec` (trezor_crypto_sources)
 7. Add `cpp/<Domain>.cpp` to `add_library` in CMakeLists.txt
 8. Add method signatures to `RawSpec` in `src/NativeReactNativeCryptoLib.ts`
-9. Create `src/<domain>.native.tsx` (import from `src/buffer.tsx`)
-10. Create `src/<domain>.tsx` (fallback)
+   (Promise-returning for async thunks)
+9. Create `src/<domain>.native.tsx` (import from `src/buffer.tsx`).
+   Async ops use `wrapNativeAsync`; sync ops use `wrapNative`.
+10. Create `src/<domain>.tsx` (fallback) — match async/sync return types
 11. Export from `src/index.tsx`
 12. Run `yarn prepare` to rebuild TS + codegen
 13. Add test vectors to `example/src/testVectors.ts`

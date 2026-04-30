@@ -297,18 +297,18 @@ function kdfTests(): TestResult[] {
     // PBKDF2-SHA256
     hexCheck(
       'pbkdf2_sha256("password","salt",1,32)',
-      kdf.pbkdf2_sha256(pbPass, pbSalt, 1, 32),
+      kdf.pbkdf2_sha256Sync(pbPass, pbSalt, 1, 32),
       '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b'
     ),
     hexCheck(
       'pbkdf2_sha256("password","salt",4096,32)',
-      kdf.pbkdf2_sha256(pbPass, pbSalt, 4096, 32),
+      kdf.pbkdf2_sha256Sync(pbPass, pbSalt, 4096, 32),
       'c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a'
     ),
     // PBKDF2-SHA512
     hexCheck(
       'pbkdf2_sha512("password","salt",1,64)',
-      kdf.pbkdf2_sha512(pbPass, pbSalt, 1, 64),
+      kdf.pbkdf2_sha512Sync(pbPass, pbSalt, 1, 64),
       '867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce'
     ),
   ];
@@ -718,10 +718,14 @@ function bipTests(): TestResult[] {
       'bip39.validate(invalid)',
       () => !bip39.validate('abandon abandon abandon')
     ),
-    hexCheck('bip39.toSeed("")', bip39.toSeed(mnemonic, ''), expectedSeedEmpty),
     hexCheck(
-      'bip39.toSeed("TREZOR")',
-      bip39.toSeed(mnemonic, 'TREZOR'),
+      'bip39.toSeedSync("")',
+      bip39.toSeedSync(mnemonic, ''),
+      expectedSeedEmpty
+    ),
+    hexCheck(
+      'bip39.toSeedSync("TREZOR")',
+      bip39.toSeedSync(mnemonic, 'TREZOR'),
       expectedSeedTrezor
     ),
     check(
@@ -988,18 +992,18 @@ function slip39Tests(): TestResult[] {
     // Round-trip: generate + combine recovers original secret (2-of-3)
     check('slip39 round-trip 2-of-3', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece'); // 16 bytes
-      const shares = slip39.generate(secret, '', 2, 3, 0);
+      const shares = slip39.generateSync(secret, '', 2, 3, 0);
       if (shares.length !== 3) return `expected 3 shares, got ${shares.length}`;
       // Combine with first 2 shares
-      const recovered = slip39.combine([shares[0]!, shares[1]!], '');
+      const recovered = slip39.combineSync([shares[0]!, shares[1]!], '');
       return eq(recovered, secret) || `got ${toHex(recovered)}`;
     }),
 
     // Round-trip: combine with different pair of shares
     check('slip39 round-trip different pair', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, '', 2, 3, 0);
-      const recovered = slip39.combine([shares[0]!, shares[2]!], '');
+      const shares = slip39.generateSync(secret, '', 2, 3, 0);
+      const recovered = slip39.combineSync([shares[0]!, shares[2]!], '');
       return eq(recovered, secret) || `got ${toHex(recovered)}`;
     }),
 
@@ -1008,9 +1012,9 @@ function slip39Tests(): TestResult[] {
       const secret = fromHex(
         'bb54aac4b89dc868ba37d9cc21b2cece' + 'e25053423dba16c395a0e8a1bd04e656'
       );
-      const shares = slip39.generate(secret, '', 3, 5, 0);
+      const shares = slip39.generateSync(secret, '', 3, 5, 0);
       if (shares.length !== 5) return `expected 5 shares, got ${shares.length}`;
-      const recovered = slip39.combine(
+      const recovered = slip39.combineSync(
         [shares[0]!, shares[2]!, shares[4]!],
         ''
       );
@@ -1020,10 +1024,10 @@ function slip39Tests(): TestResult[] {
     // Threshold 1: every share recovers the secret
     check('slip39 threshold 1-of-3', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, '', 1, 3, 0);
-      const r1 = slip39.combine([shares[0]!], '');
-      const r2 = slip39.combine([shares[1]!], '');
-      const r3 = slip39.combine([shares[2]!], '');
+      const shares = slip39.generateSync(secret, '', 1, 3, 0);
+      const r1 = slip39.combineSync([shares[0]!], '');
+      const r2 = slip39.combineSync([shares[1]!], '');
+      const r3 = slip39.combineSync([shares[2]!], '');
       return (
         (eq(r1, secret) && eq(r2, secret) && eq(r3, secret)) ||
         'not all shares recover the secret'
@@ -1033,9 +1037,9 @@ function slip39Tests(): TestResult[] {
     // Passphrase changes the output
     check('slip39 passphrase changes recovered secret', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, 'test', 2, 3, 0);
-      const correct = slip39.combine([shares[0]!, shares[1]!], 'test');
-      const wrong = slip39.combine([shares[0]!, shares[1]!], 'wrong');
+      const shares = slip39.generateSync(secret, 'test', 2, 3, 0);
+      const correct = slip39.combineSync([shares[0]!, shares[1]!], 'test');
+      const wrong = slip39.combineSync([shares[0]!, shares[1]!], 'wrong');
       return (
         (eq(correct, secret) && !eq(wrong, secret)) ||
         'passphrase did not affect result'
@@ -1045,14 +1049,14 @@ function slip39Tests(): TestResult[] {
     // Validate mnemonic
     check('slip39 validateMnemonic valid', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, '', 2, 2, 0);
+      const shares = slip39.generateSync(secret, '', 2, 2, 0);
       return slip39.validateMnemonic(shares[0]!) || 'valid mnemonic rejected';
     }),
 
     // Validate mnemonic fails on corrupted input
     check('slip39 validateMnemonic corrupted', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, '', 2, 2, 0);
+      const shares = slip39.generateSync(secret, '', 2, 2, 0);
       // Corrupt a word
       const words = shares[0]!.split(' ');
       words[5] = words[5] === 'academic' ? 'acid' : 'academic';
@@ -1065,14 +1069,14 @@ function slip39Tests(): TestResult[] {
     // Insufficient shares throws
     throws('slip39 insufficient shares throws', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const shares = slip39.generate(secret, '', 3, 5, 0);
-      slip39.combine([shares[0]!, shares[1]!], ''); // only 2, need 3
+      const shares = slip39.generateSync(secret, '', 3, 5, 0);
+      slip39.combineSync([shares[0]!, shares[1]!], ''); // only 2, need 3
     }),
 
     // Multi-group round-trip
     check('slip39 multi-group 2-of-3 groups', () => {
       const secret = fromHex('bb54aac4b89dc868ba37d9cc21b2cece');
-      const groups = slip39.generateGroups(
+      const groups = slip39.generateGroupsSync(
         secret,
         '',
         2,
@@ -1085,7 +1089,7 @@ function slip39Tests(): TestResult[] {
       );
       if (groups.length !== 3) return `expected 3 groups, got ${groups.length}`;
       // Use 2 shares from group 0 + 1 share from group 2
-      const recovered = slip39.combine(
+      const recovered = slip39.combineSync(
         [groups[0]![0]!, groups[0]![1]!, groups[2]![0]!],
         ''
       );
@@ -1877,6 +1881,72 @@ async function secureKVSignTests(): Promise<TestResult[]> {
   return results;
 }
 
+// Smoke tests for the async variants of the heavy operations. Each one
+// runs the async API and compares against the sync API's output to make
+// sure both code paths agree (the C++ helpers are shared, so this is
+// really verifying that the worker-thread + finishWork plumbing wraps
+// the result correctly for each shape: ArrayBuffer, string[], string[][]).
+async function asyncOpsTests(): Promise<TestResult[]> {
+  const out: TestResult[] = [];
+  const pwd = ascii('password');
+  const salt = ascii('salt');
+
+  out.push(
+    await checkAsync('async kdf.pbkdf2_sha256 matches sync', async () => {
+      const a = await kdf.pbkdf2_sha256(pwd, salt, 1000, 32);
+      const s = kdf.pbkdf2_sha256Sync(pwd, salt, 1000, 32);
+      return eq(a, s) || `async ${toHex(a)} != sync ${toHex(s)}`;
+    }),
+    await checkAsync('async kdf.pbkdf2_sha512 matches sync', async () => {
+      const a = await kdf.pbkdf2_sha512(pwd, salt, 1000, 64);
+      const s = kdf.pbkdf2_sha512Sync(pwd, salt, 1000, 64);
+      return eq(a, s) || `async ${toHex(a)} != sync ${toHex(s)}`;
+    }),
+    await checkAsync('async bip39.toSeed matches sync', async () => {
+      const m =
+        'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+      const a = await bip39.toSeed(m, 'TREZOR');
+      const s = bip39.toSeedSync(m, 'TREZOR');
+      return eq(a, s) || `async ${toHex(a)} != sync ${toHex(s)}`;
+    }),
+    await checkAsync('async slip39.generate + combine round-trip', async () => {
+      const secret = fromHex('0123456789abcdef0123456789abcdef');
+      const shares = await slip39.generate(secret, 'pp', 2, 3, 0);
+      if (!Array.isArray(shares) || shares.length !== 3) {
+        return `expected 3 shares, got ${shares.length}`;
+      }
+      const recovered = await slip39.combine([shares[0]!, shares[2]!], 'pp');
+      return eq(recovered, secret) || `recovered ${toHex(recovered)}`;
+    }),
+    await checkAsync(
+      'async slip39.generateGroups returns nested arrays',
+      async () => {
+        const secret = fromHex('0123456789abcdef0123456789abcdef');
+        const groups = await slip39.generateGroups(
+          secret,
+          '',
+          2,
+          [
+            { threshold: 1, count: 1 },
+            { threshold: 2, count: 3 },
+          ],
+          0
+        );
+        if (groups.length !== 2)
+          return `expected 2 groups, got ${groups.length}`;
+        if (groups[0]!.length !== 1) return `group[0] size`;
+        if (groups[1]!.length !== 3) return `group[1] size`;
+        const recovered = await slip39.combine(
+          [groups[0]![0]!, groups[1]![0]!, groups[1]![1]!],
+          ''
+        );
+        return eq(recovered, secret) || `recovered ${toHex(recovered)}`;
+      }
+    )
+  );
+  return out;
+}
+
 export async function runAllTests(): Promise<TestResult[]> {
   return [
     ...hashTests(),
@@ -1891,6 +1961,7 @@ export async function runAllTests(): Promise<TestResult[]> {
     ...eccTests(),
     ...webcryptoTests(),
     ...slip39Tests(),
+    ...(await asyncOpsTests()),
     ...(await secureKVTests()),
     ...(await secureKVSignTests()),
   ];

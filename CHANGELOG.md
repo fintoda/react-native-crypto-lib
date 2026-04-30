@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [Unreleased]
+
+### Added
+
+- Async (Promise-returning) variants for the heavy crypto primitives.
+  `kdf.pbkdf2_sha256`, `kdf.pbkdf2_sha512`, `bip39.toSeed`,
+  `slip39.generate`, `slip39.generateGroups`, and `slip39.combine` now
+  run on a worker thread, keeping the JS thread responsive during
+  multi-hundred-millisecond derivations.
+- `*Sync` escape-hatch variants for each of the above
+  (`pbkdf2_sha256Sync`, `toSeedSync`, `generateSync`, etc.) for callers
+  that prefer synchronous returns.
+- `secureKV` audit-driven hardening across all layers (see commit
+  `a2d4041`): worker-thread dispatch for every secureKV/biometric thunk,
+  per-call biometric prompt copy, iOS `kSecUseAuthenticationUISkip`
+  for `has()`, Android API 28-29 silent downgrade for biometric
+  validity windows, FQCN-based JNI exception mapping, on-device
+  `BiometricCanceledError`.
+
+### Changed
+
+- **Breaking**: `kdf.pbkdf2_sha{256,512}`, `bip39.toSeed`, and
+  `slip39.{generate,generateGroups,combine}` now return Promises.
+  Migration:
+  - preferred — `await` the call;
+  - minimal — switch to the `*Sync` variant
+    (e.g. `bip39.toSeedSync(mnemonic)`).
+- iOS `BiometricBackend::authenticate` now times out after 120 s
+  instead of waiting forever (mirrors the Android cap).
+- Android secureKV biometric blob format gained a v2 variant with a
+  plaintext key prefix so `secureKV.list()` can enumerate biometric
+  entries without prompting. Legacy v1 blobs continue to read but
+  are skipped from `list()`.
+
 ## [0.9.0] - 2026-04-12
 
 ### Added

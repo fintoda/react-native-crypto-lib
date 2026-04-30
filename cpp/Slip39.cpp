@@ -458,54 +458,51 @@ static bool generate_shares(
 }
 
 // ---------------------------------------------------------------------------
-// JSI methods
+// Worker-thread-safe helpers
+//
+// Pure C++ entry points that do the actual SLIP-39 work without any
+// dependency on jsi::Runtime. Both the synchronous JSI thunks and the
+// async makePromiseAsync paths funnel through these so the heavy
+// PBKDF2+Feistel work runs identically in both modes.
+//
+// Errors are reported as std::runtime_error with the `reason` part only
+// (no method-name prefix) — callers prepend "<op>: " when surfacing.
 // ---------------------------------------------------------------------------
 
-jsi::Value invoke_slip39_generate(
-    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
-  auto secret = requireArrayBufferAt(
-    rt, "slip39_generate", "masterSecret", args, count, 0);
-  auto passphrase = requireStringAt(
-    rt, "slip39_generate", "passphrase", args, count, 1);
-  auto threshold = static_cast<uint8_t>(requireIntAt(
-    rt, "slip39_generate", "threshold", args, count, 2, 1, kMaxShareCount));
-  auto shareCount = static_cast<uint8_t>(requireIntAt(
-    rt, "slip39_generate", "shareCount", args, count, 3, 1, kMaxShareCount));
-  auto iterExp = static_cast<uint8_t>(requireIntAt(
-    rt, "slip39_generate", "iterationExponent", args, count, 4, 0, 15));
+struct GroupSpec {
+  uint8_t threshold;
+  uint8_t shareCount;
+};
 
-  size_t secretLen = secret.size(rt);
+std::vector<std::string> doSlip39Generate(
+    const uint8_t* secret, size_t secretLen,
+    const std::string& passphrase,
+    uint8_t threshold, uint8_t shareCount, uint8_t iterExp) {
   if (secretLen < kMinSecretLen || secretLen > kMaxSecretLen ||
       secretLen % 2 != 0) {
-    throw jsi::JSError(
-      rt, "slip39_generate: masterSecret must be 16-32 bytes, even length");
+    throw std::runtime_error("masterSecret must be 16-32 bytes, even length");
   }
   if (threshold > shareCount) {
-    throw jsi::JSError(
-      rt, "slip39_generate: threshold must be <= shareCount");
+    throw std::runtime_error("threshold must be <= shareCount");
   }
 
-  // Generate random 15-bit ID
   uint16_t id = 0;
   arc4random_buf(&id, sizeof(id));
   id &= 0x7FFF;
 
-  // Encrypt master secret with passphrase
   std::vector<uint8_t> encrypted(secretLen);
-  slip39_encrypt(secret.data(rt), secretLen, passphrase, id, iterExp,
-                 encrypted.data());
+  slip39_encrypt(secret, secretLen, passphrase, id, iterExp, encrypted.data());
 
-  // Generate Shamir shares of the encrypted secret
   std::vector<uint8_t> shares(shareCount * secretLen);
   if (!generate_shares(threshold, shareCount, encrypted.data(), secretLen,
                        shares.data())) {
     memzero(encrypted.data(), encrypted.size());
-    throw jsi::JSError(rt, "slip39_generate: share generation failed");
+    throw std::runtime_error("share generation failed");
   }
   memzero(encrypted.data(), encrypted.size());
 
-  // Encode each share as a mnemonic
-  auto result = jsi::Array(rt, shareCount);
+  std::vector<std::string> result;
+  result.reserve(shareCount);
   for (uint8_t i = 0; i < shareCount; i++) {
     ShareHeader h{};
     h.id = id;
@@ -515,39 +512,20 @@ jsi::Value invoke_slip39_generate(
     h.groupCount = 1;
     h.memberIndex = i;
     h.memberThreshold = threshold;
-
     auto wordSeq = encode_share(h, shares.data() + i * secretLen, secretLen);
-    auto mnemonic = words_to_mnemonic(wordSeq);
-    result.setValueAtIndex(rt, i, jsi::String::createFromUtf8(rt, mnemonic));
+    result.push_back(words_to_mnemonic(wordSeq));
   }
-
   memzero(shares.data(), shares.size());
   return result;
 }
 
-jsi::Value invoke_slip39_combine(
-    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
-  // mnemonics are passed as a single string joined by '\n'
-  auto mnemonicsStr = requireStringAt(
-    rt, "slip39_combine", "mnemonics", args, count, 0);
-  auto passphrase = requireStringAt(
-    rt, "slip39_combine", "passphrase", args, count, 1);
-
-  // Split by newline
-  std::vector<std::string> mnemonics;
-  std::istringstream iss(mnemonicsStr);
-  std::string line;
-  while (std::getline(iss, line, '\n')) {
-    if (!line.empty()) {
-      mnemonics.push_back(line);
-    }
-  }
-
+std::vector<uint8_t> doSlip39Combine(
+    const std::vector<std::string>& mnemonics,
+    const std::string& passphrase) {
   if (mnemonics.empty()) {
-    throw jsi::JSError(rt, "slip39_combine: no mnemonics provided");
+    throw std::runtime_error("no mnemonics provided");
   }
 
-  // Decode all mnemonics
   struct DecodedShare {
     ShareHeader header;
     std::vector<uint8_t> value;
@@ -558,21 +536,19 @@ jsi::Value invoke_slip39_combine(
   for (auto& m : mnemonics) {
     std::vector<uint16_t> words;
     if (!mnemonic_to_words(m, words)) {
-      throw jsi::JSError(rt, "slip39_combine: invalid mnemonic word");
+      throw std::runtime_error("invalid mnemonic word");
     }
     DecodedShare ds{};
     if (!decode_share(words, ds.header, ds.value)) {
-      throw jsi::JSError(rt, "slip39_combine: invalid share (checksum failed)");
+      throw std::runtime_error("invalid share (checksum failed)");
     }
     decoded.push_back(std::move(ds));
   }
 
-  // Helper to zero all decoded share values before throwing
   auto cleanDecoded = [&decoded]() {
     for (auto& ds : decoded) memzero(ds.value.data(), ds.value.size());
   };
 
-  // Validate all headers match
   const auto& ref = decoded[0].header;
   for (size_t i = 1; i < decoded.size(); i++) {
     const auto& h = decoded[i].header;
@@ -580,8 +556,7 @@ jsi::Value invoke_slip39_combine(
         h.groupThreshold != ref.groupThreshold ||
         h.groupCount != ref.groupCount) {
       cleanDecoded();
-      throw jsi::JSError(
-        rt, "slip39_combine: mismatched share headers (different set)");
+      throw std::runtime_error("mismatched share headers (different set)");
     }
   }
 
@@ -589,18 +564,15 @@ jsi::Value invoke_slip39_combine(
   if (secretLen < kMinSecretLen || secretLen > kMaxSecretLen ||
       secretLen % 2 != 0) {
     cleanDecoded();
-    throw jsi::JSError(
-      rt, "slip39_combine: invalid share value length");
+    throw std::runtime_error("invalid share value length");
   }
   for (size_t i = 1; i < decoded.size(); i++) {
     if (decoded[i].value.size() != secretLen) {
       cleanDecoded();
-      throw jsi::JSError(
-        rt, "slip39_combine: mismatched share lengths");
+      throw std::runtime_error("mismatched share lengths");
     }
   }
 
-  // Group shares by group_index
   struct GroupData {
     uint8_t memberThreshold;
     std::vector<uint8_t> memberIndices;
@@ -611,33 +583,27 @@ jsi::Value invoke_slip39_combine(
     auto gi = ds.header.groupIndex;
     if (gi >= ref.groupCount) {
       cleanDecoded();
-      throw jsi::JSError(rt, "slip39_combine: invalid group index");
+      throw std::runtime_error("invalid group index");
     }
     groups[gi].memberThreshold = ds.header.memberThreshold;
     groups[gi].memberIndices.push_back(ds.header.memberIndex);
     groups[gi].memberValues.push_back(ds.value);
   }
 
-  // Recover group secrets
   std::vector<uint8_t> groupIndices;
   std::vector<std::vector<uint8_t>> groupSecrets;
 
   for (uint8_t gi = 0; gi < ref.groupCount; gi++) {
     auto& g = groups[gi];
     if (g.memberIndices.empty()) continue;
-
     if (g.memberIndices.size() < g.memberThreshold) {
       cleanDecoded();
-      throw jsi::JSError(
-        rt, "slip39_combine: insufficient shares in group");
+      throw std::runtime_error("insufficient shares in group");
     }
-
     std::vector<uint8_t> groupSecret(secretLen);
     if (g.memberThreshold == 1) {
-      // Threshold 1: share IS the group secret
       memcpy(groupSecret.data(), g.memberValues[0].data(), secretLen);
     } else {
-      // Interpolate member shares to recover group secret
       std::vector<const uint8_t*> valuePtrs(g.memberIndices.size());
       for (size_t i = 0; i < g.memberIndices.size(); i++) {
         valuePtrs[i] = g.memberValues[i].data();
@@ -647,8 +613,8 @@ jsi::Value invoke_slip39_combine(
             g.memberIndices.data(), valuePtrs.data(),
             static_cast<uint8_t>(g.memberIndices.size()), secretLen)) {
         cleanDecoded();
-        throw jsi::JSError(
-          rt, "slip39_combine: Shamir interpolation failed (duplicate shares?)");
+        throw std::runtime_error(
+          "Shamir interpolation failed (duplicate shares?)");
       }
     }
     groupIndices.push_back(gi);
@@ -658,11 +624,9 @@ jsi::Value invoke_slip39_combine(
   if (groupIndices.size() < ref.groupThreshold) {
     cleanDecoded();
     for (auto& gs : groupSecrets) memzero(gs.data(), gs.size());
-    throw jsi::JSError(
-      rt, "slip39_combine: insufficient groups for recovery");
+    throw std::runtime_error("insufficient groups for recovery");
   }
 
-  // Recover the encrypted master secret from group secrets
   std::vector<uint8_t> encryptedSecret(secretLen);
   if (ref.groupThreshold == 1) {
     memcpy(encryptedSecret.data(), groupSecrets[0].data(), secretLen);
@@ -677,24 +641,213 @@ jsi::Value invoke_slip39_combine(
           static_cast<uint8_t>(groupIndices.size()), secretLen)) {
       cleanDecoded();
       for (auto& gs : groupSecrets) memzero(gs.data(), gs.size());
-      throw jsi::JSError(
-        rt, "slip39_combine: group-level interpolation failed");
+      throw std::runtime_error("group-level interpolation failed");
     }
   }
-
-  // Clean up group secrets
   for (auto& gs : groupSecrets) memzero(gs.data(), gs.size());
 
-  // Decrypt with passphrase
   std::vector<uint8_t> masterSecret(secretLen);
   slip39_decrypt(encryptedSecret.data(), secretLen, passphrase,
                  ref.id, ref.iterationExponent, masterSecret.data());
   memzero(encryptedSecret.data(), encryptedSecret.size());
-
-  // Clean up decoded share values
   for (auto& ds : decoded) memzero(ds.value.data(), ds.value.size());
+  return masterSecret;
+}
 
-  return wrapDigest(rt, std::move(masterSecret));
+std::vector<std::vector<std::string>> doSlip39GenerateGroups(
+    const uint8_t* secret, size_t secretLen,
+    const std::string& passphrase,
+    uint8_t groupThreshold,
+    const std::vector<GroupSpec>& groupSpecs,
+    uint8_t iterExp) {
+  if (secretLen < kMinSecretLen || secretLen > kMaxSecretLen ||
+      secretLen % 2 != 0) {
+    throw std::runtime_error("masterSecret must be 16-32 bytes, even length");
+  }
+  if (groupSpecs.empty() || groupSpecs.size() > kMaxGroupCount) {
+    throw std::runtime_error("group count must be 1..16");
+  }
+  uint8_t groupCount = static_cast<uint8_t>(groupSpecs.size());
+  if (groupThreshold == 0 || groupThreshold > groupCount) {
+    throw std::runtime_error("groupThreshold must be 1..groupCount");
+  }
+  for (auto& s : groupSpecs) {
+    if (s.threshold < 1 || s.threshold > s.shareCount ||
+        s.shareCount > kMaxShareCount) {
+      throw std::runtime_error("invalid group spec");
+    }
+  }
+
+  uint16_t id = 0;
+  arc4random_buf(&id, sizeof(id));
+  id &= 0x7FFF;
+
+  std::vector<uint8_t> encrypted(secretLen);
+  slip39_encrypt(secret, secretLen, passphrase, id, iterExp, encrypted.data());
+
+  std::vector<uint8_t> groupShares(groupCount * secretLen);
+  if (!generate_shares(groupThreshold, groupCount, encrypted.data(), secretLen,
+                       groupShares.data())) {
+    memzero(encrypted.data(), encrypted.size());
+    throw std::runtime_error("group share generation failed");
+  }
+  memzero(encrypted.data(), encrypted.size());
+
+  std::vector<std::vector<std::string>> result;
+  result.reserve(groupCount);
+  for (uint8_t gi = 0; gi < groupCount; gi++) {
+    const uint8_t* groupSecret = groupShares.data() + gi * secretLen;
+    auto& spec = groupSpecs[gi];
+    std::vector<uint8_t> memberShares(spec.shareCount * secretLen);
+    if (!generate_shares(spec.threshold, spec.shareCount, groupSecret,
+                         secretLen, memberShares.data())) {
+      memzero(groupShares.data(), groupShares.size());
+      throw std::runtime_error("member share generation failed");
+    }
+    std::vector<std::string> groupMnemonics;
+    groupMnemonics.reserve(spec.shareCount);
+    for (uint8_t mi = 0; mi < spec.shareCount; mi++) {
+      ShareHeader h{};
+      h.id = id;
+      h.iterationExponent = iterExp;
+      h.groupIndex = gi;
+      h.groupThreshold = groupThreshold;
+      h.groupCount = groupCount;
+      h.memberIndex = mi;
+      h.memberThreshold = spec.threshold;
+      auto wordSeq = encode_share(
+        h, memberShares.data() + mi * secretLen, secretLen);
+      groupMnemonics.push_back(words_to_mnemonic(wordSeq));
+    }
+    memzero(memberShares.data(), memberShares.size());
+    result.push_back(std::move(groupMnemonics));
+  }
+  memzero(groupShares.data(), groupShares.size());
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// JSI thunks
+// ---------------------------------------------------------------------------
+
+// Wrap helper invocation with an op-name prefix and rethrow as JSError so
+// sync thunks keep the existing "slip39_*: <reason>" error format.
+template <typename F>
+auto syncCall(jsi::Runtime& rt, const char* op, F&& fn) -> decltype(fn()) {
+  try {
+    return fn();
+  } catch (const std::runtime_error& e) {
+    throw jsi::JSError(rt, std::string(op) + ": " + e.what());
+  }
+}
+
+jsi::Value invoke_slip39_generate(
+    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
+  auto secret = requireArrayBufferAt(
+    rt, "slip39_generate", "masterSecret", args, count, 0);
+  auto passphrase = requireStringAt(
+    rt, "slip39_generate", "passphrase", args, count, 1);
+  auto threshold = static_cast<uint8_t>(requireIntAt(
+    rt, "slip39_generate", "threshold", args, count, 2, 1, kMaxShareCount));
+  auto shareCount = static_cast<uint8_t>(requireIntAt(
+    rt, "slip39_generate", "shareCount", args, count, 3, 1, kMaxShareCount));
+  auto iterExp = static_cast<uint8_t>(requireIntAt(
+    rt, "slip39_generate", "iterationExponent", args, count, 4, 0, 15));
+
+  auto mnemonics = syncCall(rt, "slip39_generate", [&] {
+    return doSlip39Generate(
+      secret.data(rt), secret.size(rt), passphrase,
+      threshold, shareCount, iterExp);
+  });
+
+  auto result = jsi::Array(rt, mnemonics.size());
+  for (size_t i = 0; i < mnemonics.size(); i++) {
+    result.setValueAtIndex(
+      rt, i, jsi::String::createFromUtf8(rt, mnemonics[i]));
+  }
+  return result;
+}
+
+jsi::Value invoke_slip39_generate_async(
+    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
+  return safeAsyncThunk(rt, [&] {
+    auto secretBuf = requireArrayBufferAt(
+      rt, "slip39_generate_async", "masterSecret", args, count, 0);
+    auto passphrase = requireStringAt(
+      rt, "slip39_generate_async", "passphrase", args, count, 1);
+    auto threshold = static_cast<uint8_t>(requireIntAt(
+      rt, "slip39_generate_async", "threshold", args, count, 2, 1, kMaxShareCount));
+    auto shareCount = static_cast<uint8_t>(requireIntAt(
+      rt, "slip39_generate_async", "shareCount", args, count, 3, 1, kMaxShareCount));
+    auto iterExp = static_cast<uint8_t>(requireIntAt(
+      rt, "slip39_generate_async", "iterationExponent", args, count, 4, 0, 15));
+
+    std::vector<uint8_t> secret(
+      secretBuf.data(rt), secretBuf.data(rt) + secretBuf.size(rt));
+
+    return makePromiseAsync<std::vector<std::string>>(
+      rt, "slip39_generate",
+      [secret = std::move(secret), passphrase = std::move(passphrase),
+       threshold, shareCount, iterExp]() -> std::vector<std::string> {
+        return doSlip39Generate(
+          secret.data(), secret.size(), passphrase,
+          threshold, shareCount, iterExp);
+      },
+      [](jsi::Runtime& rt, std::vector<std::string>&& mnemonics) -> jsi::Value {
+        auto arr = jsi::Array(rt, mnemonics.size());
+        for (size_t i = 0; i < mnemonics.size(); i++) {
+          arr.setValueAtIndex(
+            rt, i, jsi::String::createFromUtf8(rt, mnemonics[i]));
+        }
+        return arr;
+      });
+  });
+}
+
+// Splits a '\n'-joined mnemonics string into a vector of trimmed lines.
+static std::vector<std::string> splitMnemonics(const std::string& joined) {
+  std::vector<std::string> mnemonics;
+  std::istringstream iss(joined);
+  std::string line;
+  while (std::getline(iss, line, '\n')) {
+    if (!line.empty()) mnemonics.push_back(std::move(line));
+  }
+  return mnemonics;
+}
+
+jsi::Value invoke_slip39_combine(
+    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
+  auto mnemonicsStr = requireStringAt(
+    rt, "slip39_combine", "mnemonics", args, count, 0);
+  auto passphrase = requireStringAt(
+    rt, "slip39_combine", "passphrase", args, count, 1);
+
+  auto mnemonics = splitMnemonics(mnemonicsStr);
+  auto secret = syncCall(rt, "slip39_combine", [&] {
+    return doSlip39Combine(mnemonics, passphrase);
+  });
+  return wrapDigest(rt, std::move(secret));
+}
+
+jsi::Value invoke_slip39_combine_async(
+    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
+  return safeAsyncThunk(rt, [&] {
+    auto mnemonicsStr = requireStringAt(
+      rt, "slip39_combine_async", "mnemonics", args, count, 0);
+    auto passphrase = requireStringAt(
+      rt, "slip39_combine_async", "passphrase", args, count, 1);
+    auto mnemonics = splitMnemonics(mnemonicsStr);
+
+    return makePromiseAsync<std::vector<uint8_t>>(
+      rt, "slip39_combine",
+      [mnemonics = std::move(mnemonics), passphrase = std::move(passphrase)]()
+          -> std::vector<uint8_t> {
+        return doSlip39Combine(mnemonics, passphrase);
+      },
+      [](jsi::Runtime& rt, std::vector<uint8_t>&& secret) -> jsi::Value {
+        return wrapDigest(rt, std::move(secret));
+      });
+  });
 }
 
 jsi::Value invoke_slip39_validate_mnemonic(
@@ -711,6 +864,23 @@ jsi::Value invoke_slip39_validate_mnemonic(
   return jsi::Value(rs1024_verify_checksum(words));
 }
 
+// Decode an ArrayBuffer of packed [threshold, count] uint8 pairs into the
+// helper's GroupSpec list. Validation of individual specs is deferred to
+// `doSlip39GenerateGroups` so sync and async callers see identical errors.
+static std::vector<GroupSpec> parseGroupSpecs(
+    const uint8_t* data, size_t len) {
+  if (len < 2 || len % 2 != 0) {
+    throw std::runtime_error("groups must be packed uint8 pairs");
+  }
+  size_t groupCount = len / 2;
+  std::vector<GroupSpec> specs(groupCount);
+  for (size_t i = 0; i < groupCount; i++) {
+    specs[i].threshold = data[i * 2];
+    specs[i].shareCount = data[i * 2 + 1];
+  }
+  return specs;
+}
+
 jsi::Value invoke_slip39_generate_groups(
     jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
   auto secret = requireArrayBufferAt(
@@ -720,116 +890,94 @@ jsi::Value invoke_slip39_generate_groups(
   auto groupThreshold = static_cast<uint8_t>(requireIntAt(
     rt, "slip39_generate_groups", "groupThreshold", args, count, 2,
     1, kMaxGroupCount));
-  // groups is an ArrayBuffer of packed uint8 pairs: [threshold, count, ...]
   auto groupsBuf = requireArrayBufferAt(
     rt, "slip39_generate_groups", "groups", args, count, 3);
   auto iterExp = static_cast<uint8_t>(requireIntAt(
     rt, "slip39_generate_groups", "iterationExponent", args, count, 4, 0, 15));
 
-  size_t secretLen = secret.size(rt);
-  if (secretLen < kMinSecretLen || secretLen > kMaxSecretLen ||
-      secretLen % 2 != 0) {
-    throw jsi::JSError(
-      rt,
-      "slip39_generate_groups: masterSecret must be 16-32 bytes, even length");
-  }
+  auto groups = syncCall(rt, "slip39_generate_groups", [&] {
+    return parseGroupSpecs(groupsBuf.data(rt), groupsBuf.size(rt));
+  });
+  auto mnemonics = syncCall(rt, "slip39_generate_groups", [&] {
+    return doSlip39GenerateGroups(
+      secret.data(rt), secret.size(rt), passphrase,
+      groupThreshold, groups, iterExp);
+  });
 
-  size_t groupsBufLen = groupsBuf.size(rt);
-  if (groupsBufLen < 2 || groupsBufLen % 2 != 0) {
-    throw jsi::JSError(
-      rt, "slip39_generate_groups: groups must be packed uint8 pairs");
-  }
-  uint8_t groupCount = static_cast<uint8_t>(groupsBufLen / 2);
-  if (groupCount > kMaxGroupCount) {
-    throw jsi::JSError(rt, "slip39_generate_groups: too many groups (max 16)");
-  }
-  if (groupThreshold > groupCount) {
-    throw jsi::JSError(
-      rt, "slip39_generate_groups: groupThreshold must be <= group count");
-  }
-
-  struct GroupSpec {
-    uint8_t threshold;
-    uint8_t shareCount;
-  };
-  std::vector<GroupSpec> specs(groupCount);
-  const uint8_t* gData = groupsBuf.data(rt);
-  for (uint8_t i = 0; i < groupCount; i++) {
-    specs[i].threshold = gData[i * 2];
-    specs[i].shareCount = gData[i * 2 + 1];
-    if (specs[i].threshold < 1 || specs[i].threshold > specs[i].shareCount ||
-        specs[i].shareCount > kMaxShareCount) {
-      throw jsi::JSError(
-        rt, "slip39_generate_groups: invalid group spec");
-    }
-  }
-
-  // Generate random 15-bit ID
-  uint16_t id = 0;
-  arc4random_buf(&id, sizeof(id));
-  id &= 0x7FFF;
-
-  // Encrypt master secret
-  std::vector<uint8_t> encrypted(secretLen);
-  slip39_encrypt(secret.data(rt), secretLen, passphrase, id, iterExp,
-                 encrypted.data());
-
-  // Split encrypted secret into group secrets
-  std::vector<uint8_t> groupShares(groupCount * secretLen);
-  if (!generate_shares(groupThreshold, groupCount, encrypted.data(), secretLen,
-                       groupShares.data())) {
-    memzero(encrypted.data(), encrypted.size());
-    throw jsi::JSError(
-      rt, "slip39_generate_groups: group share generation failed");
-  }
-  memzero(encrypted.data(), encrypted.size());
-
-  // For each group, split the group secret into member shares
-  auto result = jsi::Array(rt, groupCount);
-  for (uint8_t gi = 0; gi < groupCount; gi++) {
-    const uint8_t* groupSecret = groupShares.data() + gi * secretLen;
-    auto& spec = specs[gi];
-
-    std::vector<uint8_t> memberShares(spec.shareCount * secretLen);
-    if (!generate_shares(spec.threshold, spec.shareCount, groupSecret,
-                         secretLen, memberShares.data())) {
-      memzero(groupShares.data(), groupShares.size());
-      throw jsi::JSError(
-        rt, "slip39_generate_groups: member share generation failed");
-    }
-
-    auto groupArr = jsi::Array(rt, spec.shareCount);
-    for (uint8_t mi = 0; mi < spec.shareCount; mi++) {
-      ShareHeader h{};
-      h.id = id;
-      h.iterationExponent = iterExp;
-      h.groupIndex = gi;
-      h.groupThreshold = groupThreshold;
-      h.groupCount = groupCount;
-      h.memberIndex = mi;
-      h.memberThreshold = spec.threshold;
-
-      auto wordSeq = encode_share(
-        h, memberShares.data() + mi * secretLen, secretLen);
-      auto mnemonic = words_to_mnemonic(wordSeq);
+  auto result = jsi::Array(rt, mnemonics.size());
+  for (size_t gi = 0; gi < mnemonics.size(); gi++) {
+    auto& g = mnemonics[gi];
+    auto groupArr = jsi::Array(rt, g.size());
+    for (size_t mi = 0; mi < g.size(); mi++) {
       groupArr.setValueAtIndex(
-        rt, mi, jsi::String::createFromUtf8(rt, mnemonic));
+        rt, mi, jsi::String::createFromUtf8(rt, g[mi]));
     }
-    memzero(memberShares.data(), memberShares.size());
     result.setValueAtIndex(rt, gi, std::move(groupArr));
   }
-
-  memzero(groupShares.data(), groupShares.size());
   return result;
+}
+
+jsi::Value invoke_slip39_generate_groups_async(
+    jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count) {
+  return safeAsyncThunk(rt, [&] {
+    auto secretBuf = requireArrayBufferAt(
+      rt, "slip39_generate_groups_async", "masterSecret", args, count, 0);
+    auto passphrase = requireStringAt(
+      rt, "slip39_generate_groups_async", "passphrase", args, count, 1);
+    auto groupThreshold = static_cast<uint8_t>(requireIntAt(
+      rt, "slip39_generate_groups_async", "groupThreshold", args, count, 2,
+      1, kMaxGroupCount));
+    auto groupsBuf = requireArrayBufferAt(
+      rt, "slip39_generate_groups_async", "groups", args, count, 3);
+    auto iterExp = static_cast<uint8_t>(requireIntAt(
+      rt, "slip39_generate_groups_async", "iterationExponent", args, count, 4, 0, 15));
+
+    std::vector<uint8_t> secret(
+      secretBuf.data(rt), secretBuf.data(rt) + secretBuf.size(rt));
+    std::vector<GroupSpec> groups;
+    try {
+      groups = parseGroupSpecs(groupsBuf.data(rt), groupsBuf.size(rt));
+    } catch (const std::runtime_error& e) {
+      throw jsi::JSError(
+        rt, std::string("slip39_generate_groups_async: ") + e.what());
+    }
+
+    return makePromiseAsync<std::vector<std::vector<std::string>>>(
+      rt, "slip39_generate_groups",
+      [secret = std::move(secret), passphrase = std::move(passphrase),
+       groupThreshold, groups = std::move(groups), iterExp]()
+          -> std::vector<std::vector<std::string>> {
+        return doSlip39GenerateGroups(
+          secret.data(), secret.size(), passphrase,
+          groupThreshold, groups, iterExp);
+      },
+      [](jsi::Runtime& rt,
+         std::vector<std::vector<std::string>>&& mnemonics) -> jsi::Value {
+        auto arr = jsi::Array(rt, mnemonics.size());
+        for (size_t gi = 0; gi < mnemonics.size(); gi++) {
+          auto& g = mnemonics[gi];
+          auto groupArr = jsi::Array(rt, g.size());
+          for (size_t mi = 0; mi < g.size(); mi++) {
+            groupArr.setValueAtIndex(
+              rt, mi, jsi::String::createFromUtf8(rt, g[mi]));
+          }
+          arr.setValueAtIndex(rt, gi, std::move(groupArr));
+        }
+        return arr;
+      });
+  });
 }
 
 } // namespace
 
 void registerSlip39Methods(MethodMap& map) {
-  map.push_back({"slip39_generate",           5, invoke_slip39_generate});
-  map.push_back({"slip39_generate_groups",    5, invoke_slip39_generate_groups});
-  map.push_back({"slip39_combine",            2, invoke_slip39_combine});
-  map.push_back({"slip39_validate_mnemonic",  1, invoke_slip39_validate_mnemonic});
+  map.push_back({"slip39_generate",                 5, invoke_slip39_generate});
+  map.push_back({"slip39_generate_async",           5, invoke_slip39_generate_async});
+  map.push_back({"slip39_generate_groups",          5, invoke_slip39_generate_groups});
+  map.push_back({"slip39_generate_groups_async",    5, invoke_slip39_generate_groups_async});
+  map.push_back({"slip39_combine",                  2, invoke_slip39_combine});
+  map.push_back({"slip39_combine_async",            2, invoke_slip39_combine_async});
+  map.push_back({"slip39_validate_mnemonic",        1, invoke_slip39_validate_mnemonic});
 }
 
 }

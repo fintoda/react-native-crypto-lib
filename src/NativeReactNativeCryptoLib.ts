@@ -38,6 +38,21 @@ export interface RawSpec {
     iterations: number,
     length: number
   ): ArrayBuffer;
+  /** Async variants — derivation runs on a worker thread so the JS thread
+   *  stays responsive. JS wrapper exposes these as `pbkdf2_sha{256,512}`,
+   *  with sync paths kept under the `*Sync` suffix. */
+  kdf_pbkdf2_sha256_async(
+    password: ArrayBuffer,
+    salt: ArrayBuffer,
+    iterations: number,
+    length: number
+  ): Promise<ArrayBuffer>;
+  kdf_pbkdf2_sha512_async(
+    password: ArrayBuffer,
+    salt: ArrayBuffer,
+    iterations: number,
+    length: number
+  ): Promise<ArrayBuffer>;
   kdf_hkdf_sha256(
     ikm: ArrayBuffer,
     salt: ArrayBuffer,
@@ -188,6 +203,12 @@ export interface RawSpec {
   bip39_from_entropy(entropy: ArrayBuffer): string;
   bip39_check(mnemonic: string): boolean;
   bip39_to_seed(mnemonic: string, passphrase: string): ArrayBuffer;
+  /** Async — internal PBKDF2-HMAC-SHA512×2048 runs on a worker thread.
+   *  JS API exposes this as `bip39.toSeed`. */
+  bip39_to_seed_async(
+    mnemonic: string,
+    passphrase: string
+  ): Promise<ArrayBuffer>;
 
   /**
    * BIP-32 / SLIP-10 HD key derivation. HDNode is serialized as a fixed
@@ -215,6 +236,10 @@ export interface RawSpec {
   /**
    * SLIP-39 Shamir Secret Sharing.
    * Single-group: split master secret into threshold-of-shareCount shares.
+   *
+   * `*_async` variants run PBKDF2+Feistel on a worker thread; JS API
+   * exposes them as the unsuffixed `slip39.{generate,generateGroups,combine}`,
+   * with the sync paths under the `*Sync` suffix.
    */
   slip39_generate(
     masterSecret: ArrayBuffer,
@@ -223,6 +248,13 @@ export interface RawSpec {
     shareCount: number,
     iterationExponent: number
   ): string[];
+  slip39_generate_async(
+    masterSecret: ArrayBuffer,
+    passphrase: string,
+    threshold: number,
+    shareCount: number,
+    iterationExponent: number
+  ): Promise<string[]>;
   /** Multi-group: groups is packed uint8 pairs [threshold, count, ...]. */
   slip39_generate_groups(
     masterSecret: ArrayBuffer,
@@ -231,8 +263,19 @@ export interface RawSpec {
     groups: ArrayBuffer,
     iterationExponent: number
   ): string[][];
+  slip39_generate_groups_async(
+    masterSecret: ArrayBuffer,
+    passphrase: string,
+    groupThreshold: number,
+    groups: ArrayBuffer,
+    iterationExponent: number
+  ): Promise<string[][]>;
   /** Recover master secret from '\n'-joined mnemonics. */
   slip39_combine(mnemonics: string, passphrase: string): ArrayBuffer;
+  slip39_combine_async(
+    mnemonics: string,
+    passphrase: string
+  ): Promise<ArrayBuffer>;
   slip39_validate_mnemonic(mnemonic: string): boolean;
 
   /**

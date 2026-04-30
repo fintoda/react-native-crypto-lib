@@ -78,13 +78,40 @@ jsi::Value invoke_bip39_to_seed(
   return wrapDigest(rt, std::move(out));
 }
 
+// Async variant — `mnemonic_to_seed` runs PBKDF2-HMAC-SHA512×2048 and
+// can take 10-50ms on a phone, enough to drop frames. JS API exposes
+// this as `bip39.toSeed`, with the sync path under `bip39.toSeedSync`.
+jsi::Value invoke_bip39_to_seed_async(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    auto mnemonic =
+      requireStringAt(rt, "bip39_to_seed_async", "mnemonic", args, count, 0);
+    auto passphrase =
+      requireStringAt(rt, "bip39_to_seed_async", "passphrase", args, count, 1);
+
+    return makePromiseAsync<std::vector<uint8_t>>(
+      rt, "bip39_to_seed",
+      [mnemonic = std::move(mnemonic), passphrase = std::move(passphrase)]()
+          -> std::vector<uint8_t> {
+        std::vector<uint8_t> out(64);
+        mnemonic_to_seed(mnemonic.c_str(), passphrase.c_str(), out.data(), nullptr);
+        return out;
+      },
+      [](jsi::Runtime& rt, std::vector<uint8_t>&& out) -> jsi::Value {
+        return wrapDigest(rt, std::move(out));
+      });
+  });
+}
+
 } // namespace
 
 void registerBip39Methods(MethodMap& map) {
-  map.push_back({"bip39_generate",     1, invoke_bip39_generate});
-  map.push_back({"bip39_from_entropy", 1, invoke_bip39_from_entropy});
-  map.push_back({"bip39_check",        1, invoke_bip39_check});
-  map.push_back({"bip39_to_seed",      2, invoke_bip39_to_seed});
+  map.push_back({"bip39_generate",       1, invoke_bip39_generate});
+  map.push_back({"bip39_from_entropy",   1, invoke_bip39_from_entropy});
+  map.push_back({"bip39_check",          1, invoke_bip39_check});
+  map.push_back({"bip39_to_seed",        2, invoke_bip39_to_seed});
+  map.push_back({"bip39_to_seed_async",  2, invoke_bip39_to_seed_async});
 }
 
 }

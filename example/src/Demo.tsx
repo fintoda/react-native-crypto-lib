@@ -32,7 +32,7 @@ function decode(data: Uint8Array): string {
 
 function runBip39Bip32Ecdsa(): DemoResult {
   const mnemonic = bip39.generate(128);
-  const seed = bip39.toSeed(mnemonic, '');
+  const seed = bip39.toSeedSync(mnemonic, '');
   const root = bip32.fromSeed(seed, 'secp256k1');
   const child = bip32.derive(root, "m/44'/0'/0'/0/0");
   const msg = hash.sha256(encode('Hello, crypto!'));
@@ -119,8 +119,8 @@ function runAesRoundTrip(): DemoResult {
 
 function runSlip39SplitCombine(): DemoResult {
   const masterSecret = rng.bytes(16);
-  const shares = slip39.generate(masterSecret, '', 2, 3, 0);
-  const recovered = slip39.combine([shares[0]!, shares[2]!], '');
+  const shares = slip39.generateSync(masterSecret, '', 2, 3, 0);
+  const recovered = slip39.combineSync([shares[0]!, shares[2]!], '');
   const match = toHex(masterSecret) === toHex(recovered);
 
   return {
