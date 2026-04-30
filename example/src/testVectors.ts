@@ -1243,6 +1243,219 @@ async function secureKVTests(): Promise<TestResult[]> {
     })
   );
 
+  // --- metadata + passphrase wrap (no-biometric paths only) ---------------
+
+  results.push(
+    await checkAsync('secureKV metadata reports missing key', async () => {
+      const m = await secureKV.metadata(k('mdmissing'));
+      return m.exists === false;
+    })
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV metadata reports plain BLOB without prompt',
+      async () => {
+        await secureKV.set(k('md.plain'), ascii('hi'));
+        const m = await secureKV.metadata(k('md.plain'));
+        if (!m.exists) return 'metadata reported missing';
+        if (m.accessControl !== 'none') return `ac=${m.accessControl}`;
+        if (m.hasPassphrase !== false) return 'expected hasPassphrase=false';
+        if (m.slotKind !== 'BLOB') return `slotKind=${m.slotKind}`;
+        return true;
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV passphrase round-trip on blob slot',
+      async () => {
+        const v = ascii('secret payload');
+        await secureKV.set(k('pp.blob'), v, { passphrase: 'pw1' });
+        const got = await secureKV.get(k('pp.blob'), { passphrase: 'pw1' });
+        if (got === null) return 'null';
+        return eq(got, v) || `got ${toHex(got)}`;
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV metadata for wrapped item: hasPassphrase=true, slotKind=WRAPPED',
+      async () => {
+        const m = await secureKV.metadata(k('pp.blob'));
+        if (!m.exists) return 'missing';
+        if (m.hasPassphrase !== true) return 'expected hasPassphrase=true';
+        if (m.slotKind !== 'WRAPPED') return `slotKind=${m.slotKind}`;
+        return true;
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync('secureKV.get with wrong passphrase rejects', async () => {
+      try {
+        await secureKV.get(k('pp.blob'), { passphrase: 'wrong' });
+        return 'expected throw';
+      } catch (e: unknown) {
+        const name = (e as { name?: string }).name ?? '';
+        if (name !== 'WrongPassphraseError') return `got ${name}`;
+        return true;
+      }
+    })
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV.get without passphrase on wrapped item rejects',
+      async () => {
+        try {
+          await secureKV.get(k('pp.blob'));
+          return 'expected throw';
+        } catch (e: unknown) {
+          const name = (e as { name?: string }).name ?? '';
+          if (name !== 'PassphraseRequiredError') return `got ${name}`;
+          return true;
+        }
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync('secureKV.changePassphrase: add wrap', async () => {
+      await secureKV.set(k('cp'), ascii('value'));
+      await secureKV.changePassphrase(k('cp'), '', 'pp1');
+      const m = await secureKV.metadata(k('cp'));
+      if (!m.hasPassphrase) return 'metadata still hasPassphrase=false';
+      const v = await secureKV.get(k('cp'), { passphrase: 'pp1' });
+      return (v !== null && eq(v, ascii('value'))) || 'value mismatch';
+    })
+  );
+
+  results.push(
+    await checkAsync('secureKV.changePassphrase: rotate', async () => {
+      await secureKV.changePassphrase(k('cp'), 'pp1', 'pp2');
+      const v = await secureKV.get(k('cp'), { passphrase: 'pp2' });
+      if (v === null || !eq(v, ascii('value'))) return 'mismatch with new pp';
+      try {
+        await secureKV.get(k('cp'), { passphrase: 'pp1' });
+        return 'old passphrase still works';
+      } catch (e: unknown) {
+        const name = (e as { name?: string }).name ?? '';
+        return name === 'WrongPassphraseError' || `got ${name}`;
+      }
+    })
+  );
+
+  results.push(
+    await checkAsync('secureKV.changePassphrase: remove wrap', async () => {
+      await secureKV.changePassphrase(k('cp'), 'pp2', '');
+      const m = await secureKV.metadata(k('cp'));
+      if (m.hasPassphrase !== false) return 'metadata still wrapped';
+      const v = await secureKV.get(k('cp'));
+      return (v !== null && eq(v, ascii('value'))) || 'mismatch';
+    })
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV.changePassphrase wrong old passphrase rejects',
+      async () => {
+        await secureKV.set(k('cp.bad'), ascii('x'), { passphrase: 'right' });
+        try {
+          await secureKV.changePassphrase(k('cp.bad'), 'wrong', 'new');
+          return 'expected throw';
+        } catch (e: unknown) {
+          const name = (e as { name?: string }).name ?? '';
+          if (name !== 'WrongPassphraseError') return `got ${name}`;
+          // item should still be readable with the original passphrase
+          const v = await secureKV.get(k('cp.bad'), { passphrase: 'right' });
+          return (v !== null && eq(v, ascii('x'))) || 'item disturbed';
+        }
+      }
+    )
+  );
+
+  // --- bip32 export / import seed round-trip -----------------------------
+
+  results.push(
+    await checkAsync(
+      'secureKV.bip32 export+import seed round-trip',
+      async () => {
+        const seed = fromHex('000102030405060708090a0b0c0d0e0f');
+        await secureKV.bip32.setSeed(k('exp.src'), seed);
+        const fpSrc = await secureKV.bip32.fingerprint(
+          k('exp.src'),
+          'm',
+          'secp256k1'
+        );
+        const env = await secureKV.bip32.exportEncryptedSeed(
+          k('exp.src'),
+          'export-pw'
+        );
+        if (!(env instanceof Uint8Array) || env.length < 50) {
+          return `envelope too short (${env.length})`;
+        }
+        await secureKV.bip32.importEncryptedSeed(
+          k('exp.dst'),
+          env,
+          'export-pw'
+        );
+        const fpDst = await secureKV.bip32.fingerprint(
+          k('exp.dst'),
+          'm',
+          'secp256k1'
+        );
+        return fpSrc === fpDst || `fp ${fpSrc} != ${fpDst}`;
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV.bip32.importEncryptedSeed wrong passphrase rejects',
+      async () => {
+        const seed = fromHex('000102030405060708090a0b0c0d0e0f');
+        await secureKV.bip32.setSeed(k('exp.bad'), seed);
+        const env = await secureKV.bip32.exportEncryptedSeed(
+          k('exp.bad'),
+          'good-pw'
+        );
+        try {
+          await secureKV.bip32.importEncryptedSeed(
+            k('exp.bad2'),
+            env,
+            'wrong-pw'
+          );
+          return 'expected throw';
+        } catch (e: unknown) {
+          const name = (e as { name?: string }).name ?? '';
+          return name === 'WrongPassphraseError' || `got ${name}`;
+        }
+      }
+    )
+  );
+
+  results.push(
+    await checkAsync(
+      'secureKV.bip32.importEncryptedSeed malformed envelope rejects',
+      async () => {
+        try {
+          await secureKV.bip32.importEncryptedSeed(
+            k('exp.malformed'),
+            new Uint8Array([0x42, 0x42, 0x42]),
+            'pw'
+          );
+          return 'expected throw';
+        } catch (e: unknown) {
+          const name = (e as { name?: string }).name ?? '';
+          return name === 'BackupFormatError' || `got ${name}`;
+        }
+      }
+    )
+  );
+
   // Unknown accessControl variants are rejected on both platforms.
   results.push(
     await throwsAsync(

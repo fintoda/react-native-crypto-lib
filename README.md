@@ -505,39 +505,65 @@ import {
 > rejections too, so a single `try/await` catches everything.
 
 - `secureKV.set(key, value, options?)` → `Promise<void>`. Stores
-  `value: Uint8Array` under `key`. Silently overwrites an existing
-  value. `options` is an `AccessControlOptions` discriminated union:
-  - `{ accessControl: 'none' }` (default) — readable while the device
-    is unlocked, no prompt.
-  - `{ accessControl: 'biometric' }` — every read triggers a system
-    biometric prompt (Face ID / Touch ID / fingerprint). **iOS only in
-    this release**; Android refuses with a clear error pending the
-    next phase.
-- `secureKV.get(key)` → `Promise<Uint8Array | null>`. Resolves to `null`
-  if the key was never set or has been deleted. Rejects with
-  `SecureKVUnavailableError` if the OS-managed master key has been
-  invalidated (factory reset, some screen-lock changes on Android).
+  `value: Uint8Array` under `key`. Silently overwrites. `options` is a
+  `SecureKVWriteOptions` bag — every field is optional:
+  - `accessControl: 'none' | 'biometric'` — defaults to `'none'`.
+  - `validityWindow: number` — biometric reuse window in seconds (only
+    meaningful with `accessControl: 'biometric'`); defaults to `0` =
+    per-call prompt.
+  - `passphrase: string` — when non-empty, wraps the slot bytes in a
+    PBKDF2-HMAC-SHA512 + AES-256-GCM envelope before storage. Reads
+    require the same passphrase. See
+    [Passphrase wrap](#passphrase-wrap) below.
+  - `passphraseIterations: number` — PBKDF2 cost stored in the envelope
+    header; default `600 000`, range `[100 000, 10 000 000]`. Ignored
+    when `passphrase` is empty.
+  - `prompt: BiometricPromptOptions` — UI copy `{ title?, subtitle?,
+    cancelLabel? }` for biometric prompts. Only honoured when the item
+    is biometric-gated.
+- `secureKV.get(key, options?)` → `Promise<Uint8Array | null>`. Resolves
+  to `null` if the key was never set / has been deleted. `options` is
+  `SecureKVReadOptions` (`{ passphrase?, prompt? }`). Rejection types:
+  - `SecureKVUnavailableError` — OS master key invalidated (factory
+    reset, screen-lock changes).
+  - `WrongPassphraseError` — `passphrase` doesn't match the wrap.
+  - `PassphraseRequiredError` — item is wrapped but no `passphrase`
+    was passed.
+  - `BackupFormatError` — verifier matched but AES-GCM auth failed,
+    indicating data corruption rather than a wrong passphrase.
 - `secureKV.has(key)` → `Promise<boolean>`.
-- `secureKV.delete(key)` → `Promise<void>` — idempotent; deleting a
-  missing key is a no-op.
-- `secureKV.list()` → `Promise<string[]>` of all keys currently stored.
-  Skips individual blobs whose authentication tag fails (orphans of a
-  prior key generation), but rejects with `SecureKVUnavailableError`
-  if the master key itself is gone — matching `get()`'s behaviour so a
-  wiped store doesn't silently look like an empty one.
+- `secureKV.delete(key)` → `Promise<void>` — idempotent.
+- `secureKV.list()` → `Promise<string[]>` of all keys. Skips individual
+  blobs whose authentication tag fails (orphans of a prior key gen).
 - `secureKV.clear()` → `Promise<void>` — wipe all keys belonging to
   this app.
 - `secureKV.isHardwareBacked()` → `Promise<boolean>`. Informational.
-  iOS always resolves to `true` (Keychain is always Secure
-  Enclave-protected with `*ThisDeviceOnly` accessibility); Android
-  reports whether the master key landed in TEE / StrongBox vs. software
-  keystore.
 - `secureKV.biometricStatus()` → `Promise<BiometricStatus>`. Returns
   one of `'available'`, `'no_hardware'`, `'not_enrolled'`,
   `'hardware_unavailable'`, `'security_update_required'`,
-  `'unsupported_os'`. Does **not** trigger a biometric prompt — safe to
-  call at app startup to decide whether to even offer
-  `accessControl: 'biometric'` in your UI.
+  `'unsupported_os'`. Does **not** trigger a biometric prompt.
+- `secureKV.metadata(key)` → `Promise<SecureKVItemMetadata>`. Plaintext
+  metadata: `{ exists, accessControl?, validityWindow?, hasPassphrase?,
+  slotKind? }`. **Never triggers a biometric prompt or AES decrypt** —
+  safe to call any time, e.g. before deciding whether to ask the user
+  for a passphrase. For `hasPassphrase=true` the inner `slotKind` is
+  intentionally not exposed (`slotKind === 'WRAPPED'`); the inner kind
+  is part of what the passphrase protects.
+- `secureKV.changePassphrase(key, oldPassphrase, newPassphrase, options?)`
+  → `Promise<void>`. In-place re-wrap. `''` for `oldPassphrase` adds a
+  wrap to a previously plaintext item; `''` for `newPassphrase`
+  removes the wrap. Inner slot bytes never cross the JSI boundary —
+  the operation is native-only even when changing wrap status of
+  SEED / RAW slots. `options.iterations` overrides the new envelope's
+  PBKDF2 cost (default 600k). `options.prompt` is the UI copy for the
+  biometric prompt if the item is biometric-gated.
+- `secureKV.changeAccessControl(key, newAccessControl, options?)` →
+  `Promise<void>`. Switches biometric on/off (or changes
+  `validityWindow`) without parsing the slot. Useful for adding
+  biometric protection to an existing item or rotating its window.
+  The blob bytes pass through C++ between the old and new master key.
+- `secureKV.invalidateBiometricSession(alias?)` → `Promise<void>`.
+  iOS-only effect: drops cached `LAContext`. Android no-op.
 
 `key` must match `[A-Za-z0-9._-]` (≤128 chars). `value` must be ≤64 KiB.
 The store is per-app — two apps using this library on the same device
@@ -548,6 +574,98 @@ use `secureKV` concurrently fails fast with a clear misconfiguration
 error rather than racing on master-key creation. If your app uses
 `android:process=` overrides, restrict `secureKV` access to one
 process.
+
+### Passphrase wrap
+
+A second encryption layer on top of Keychain / Keystore. Every item
+can carry its own passphrase; without it the stored bytes are not
+recoverable even if an attacker has the device unlocked or has
+bypassed biometric protection. The wrap envelope sits *inside* the
+Keychain/Keystore-encrypted blob, so you get defence in depth.
+
+Format: `[0x03 slot tag][1B version][4B iters BE][16B salt][12B IV]
+[16B verifier][N ciphertext][16B GCM tag]`. The verifier is
+`HMAC-SHA256(hmac_key, "secureKV.passphrase.v1")[0..16]` — checked
+*before* AES-GCM, so a wrong passphrase fails fast and is
+distinguishable from data corruption.
+
+```ts
+import { secureKV, WrongPassphraseError } from '@fintoda/react-native-crypto-lib';
+
+// Provision with a passphrase. Both Keychain/Keystore and the wrap
+// must be satisfied to read it back.
+await secureKV.set(
+  'note',
+  new TextEncoder().encode('private notes'),
+  { passphrase: userInput },
+);
+
+// Read.
+try {
+  const bytes = await secureKV.get('note', { passphrase: userInput });
+  // ...
+} catch (e) {
+  if (e instanceof WrongPassphraseError) showRetry();
+  else throw e;
+}
+
+// Add / rotate / remove the wrap on an existing item without
+// extracting the slot. SEED and RAW slots can be re-wrapped too —
+// the inner bytes never cross the JSI boundary.
+await secureKV.changePassphrase('note', '', 'pw1');     // add
+await secureKV.changePassphrase('note', 'pw1', 'pw2');  // rotate
+await secureKV.changePassphrase('note', 'pw2', '');     // remove
+
+// Inspect wrap state without prompting.
+const m = await secureKV.metadata('note');
+if (m.hasPassphrase) showPassphraseDialog();
+```
+
+`passphraseIterations` (default `600 000`) is stored in the envelope
+header. Higher counts increase brute-force resistance but slow every
+read. PBKDF2-HMAC-SHA512 runs on a worker thread (~0.3–3 s on real
+devices depending on the count and CPU); the JS thread stays
+responsive thanks to `makePromiseAsync` dispatch.
+
+### Encrypted seed backup
+
+Export a `secureKV.bip32` SEED slot as a portable encrypted blob.
+The seed never reaches JS — the blob comes out already encrypted
+under the export passphrase.
+
+```ts
+// Store a seed (could also be biometric-gated and/or storage-passphrase wrapped).
+await secureKV.bip32.setSeed('wallet', seed, { accessControl: 'biometric' });
+
+// Export. If the source alias has its own storage passphrase, pass
+// it via options.passphrase so the wrap can be unlocked.
+const envelope = await secureKV.bip32.exportEncryptedSeed(
+  'wallet',
+  'export passphrase',           // protects the exported blob
+  { passphrase: undefined,        // existing storage passphrase, if any
+    prompt: { title: 'Backup' } } // shown if alias is biometric-gated
+);
+// envelope is a `Uint8Array`. Caller chooses how to serialise:
+const base64 = btoa(String.fromCharCode(...envelope));
+
+// Restore on the same or another device. accessControl + storage
+// passphrase are independent of the export — choose whatever the
+// destination should look like.
+await secureKV.bip32.importEncryptedSeed(
+  'wallet-restored',
+  envelope,
+  'export passphrase',
+  {
+    accessControl: 'biometric',
+    passphrase: 'storage pw',     // optional new storage wrap
+  }
+);
+```
+
+Wrong export passphrase rejects with `WrongPassphraseError`; a
+malformed envelope (truncated, wrong version) rejects with
+`BackupFormatError`. SLIP-39 mnemonic shares are a separate backup
+mechanism — see [slip39](#slip39).
 
 ### Biometric gating
 

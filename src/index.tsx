@@ -2,6 +2,9 @@ export {
   CryptoError,
   SecureKVUnavailableError,
   BiometricCanceledError,
+  WrongPassphraseError,
+  PassphraseRequiredError,
+  BackupFormatError,
 } from './errors';
 export { hash } from './hash';
 export { kdf } from './kdf';
@@ -30,6 +33,9 @@ export type {
   AccessControlOptions,
   BiometricPromptOptions,
   BiometricStatus,
+  SecureKVReadOptions,
+  SecureKVWriteOptions,
+  SecureKVItemMetadata,
 } from './secureKV';
 export { biometric } from './biometric';
 export type { BiometricAuthenticateOptions } from './biometric';

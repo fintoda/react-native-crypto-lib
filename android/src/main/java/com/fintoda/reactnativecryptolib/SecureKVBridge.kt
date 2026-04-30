@@ -110,8 +110,13 @@ object SecureKVBridge {
   private const val IV_LEN = 12
   private const val TAG_BITS = 128
   private const val VARIANT_LEN = 1
+  // Plaintext metadata after the variant byte: [hasPp 1B][slotKind 1B].
+  // Read by metadata() without AES decrypt; lets the JS layer answer
+  // "is this passphrase-wrapped" / "what kind of slot is it" without
+  // triggering a biometric prompt.
+  private const val META_LEN = 2
   // Biometric blobs additionally carry a 4-byte BE window (seconds)
-  // immediately after the variant byte. Non-biometric blobs do not.
+  // immediately after the variant + meta bytes. Non-biometric blobs do not.
   private const val WINDOW_LEN = 4
   // Biometric blobs carry a 2-byte BE plaintext key length + the UTF-8
   // key bytes immediately after the window. This lets `list()` enumerate
@@ -135,6 +140,15 @@ object SecureKVBridge {
   // - 1 = biometric: [variant][window 4B][keyLen 2B][key UTF-8][IV][cipher+tag]
   private const val BLOB_VARIANT_NONE: Int = 0
   private const val BLOB_VARIANT_BIOMETRIC: Int = 1
+
+  // SlotKind enum values mirrored from cpp/SecureKVSlot.h. Stored in the
+  // plaintext blob header so metadata() can return slotKind without an
+  // AES decrypt. WRAPPED implies the inner kind is hidden behind a
+  // passphrase — list() / metadata() can't peek beneath it by design.
+  private const val BLOB_SLOT_KIND_BLOB: Int = 0x00
+  private const val BLOB_SLOT_KIND_SEED: Int = 0x01
+  private const val BLOB_SLOT_KIND_RAW: Int = 0x02
+  private const val BLOB_SLOT_KIND_WRAPPED: Int = 0x03
 
   // BiometricPrompt show + wait timeout. The OS will dismiss after its own
   // inactivity policy long before this fires; this is the absolute backstop
@@ -849,45 +863,57 @@ object SecureKVBridge {
     val sealed: ByteArray,
     // Biometric blobs only — null for non-biometric. list() surfaces
     // this name without prompting.
-    val plaintextKey: String?
+    val plaintextKey: String?,
+    // Plaintext metadata bytes (variant byte + 1B hasPp + 1B slotKind).
+    // Surfaced via metadata() without AES decrypt.
+    val hasPassphrase: Boolean,
+    val slotKind: Int
   )
 
   private fun parseBlob(blob: ByteArray): ParsedBlob {
-    if (blob.size < VARIANT_LEN + IV_LEN + TAG_BITS / 8) {
+    if (blob.size < VARIANT_LEN + META_LEN + IV_LEN + TAG_BITS / 8) {
       throw SecureKVUnavailableException("unavailable: blob truncated")
     }
     val variant = blob[0].toInt() and 0xff
+    val hasPp = (blob[1].toInt() and 0xff) != 0
+    val slotKindByte = blob[2].toInt() and 0xff
     when (variant) {
       BLOB_VARIANT_NONE -> {
-        val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
-        val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
+        val iv = blob.copyOfRange(
+          VARIANT_LEN + META_LEN, VARIANT_LEN + META_LEN + IV_LEN)
+        val sealed = blob.copyOfRange(VARIANT_LEN + META_LEN + IV_LEN, blob.size)
         return ParsedBlob(
           accessControl = ACCESS_CONTROL_NONE,
           validityWindowSec = 0,
           iv = iv,
           sealed = sealed,
-          plaintextKey = null
+          plaintextKey = null,
+          hasPassphrase = hasPp,
+          slotKind = slotKindByte
         )
       }
       BLOB_VARIANT_BIOMETRIC -> {
-        // [variant][window 4B][keyLen 2B BE][key UTF-8][IV 12B][cipher+tag]
+        // [variant][hasPp 1B][slotKind 1B][window 4B]
+        // [keyLen 2B BE][key UTF-8][IV 12B][cipher+tag]
         val minLen =
-          VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + IV_LEN + TAG_BITS / 8
+          VARIANT_LEN + META_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN +
+            IV_LEN + TAG_BITS / 8
         if (blob.size < minLen) {
           throw SecureKVUnavailableException(
             "unavailable: biometric blob truncated"
           )
         }
-        val window = readBeU32(blob, 1)
+        val window = readBeU32(blob, VARIANT_LEN + META_LEN)
+        val keyLenOff = VARIANT_LEN + META_LEN + WINDOW_LEN
         val keyLen =
-          ((blob[VARIANT_LEN + WINDOW_LEN].toInt() and 0xff) shl 8) or
-            (blob[VARIANT_LEN + WINDOW_LEN + 1].toInt() and 0xff)
+          ((blob[keyLenOff].toInt() and 0xff) shl 8) or
+            (blob[keyLenOff + 1].toInt() and 0xff)
         if (keyLen < 1 || keyLen > KEY_PREFIX_MAX) {
           throw SecureKVUnavailableException(
             "unavailable: biometric keyLen out of range ($keyLen)"
           )
         }
-        val keyStart = VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN
+        val keyStart = keyLenOff + KEY_PREFIX_LEN_LEN
         val ivStart = keyStart + keyLen
         if (blob.size < ivStart + IV_LEN + TAG_BITS / 8) {
           throw SecureKVUnavailableException(
@@ -903,6 +929,8 @@ object SecureKVBridge {
           validityWindowSec = window,
           iv = iv,
           sealed = sealed,
+          hasPassphrase = hasPp,
+          slotKind = slotKindByte,
           plaintextKey = plaintextKey
         )
       }
@@ -928,6 +956,7 @@ object SecureKVBridge {
     value: ByteArray,
     accessControl: Int,
     validityWindowSec: Int,
+    slotKind: Int,
     promptTitle: String,
     promptSubtitle: String,
     promptCancel: String
@@ -1088,12 +1117,15 @@ object SecureKVBridge {
       }
 
       // Layout:
-      //   none      : [variant][IV][cipher+tag]
-      //   biometric : [variant][window BE][2B keyLen BE][key UTF-8][IV][cipher+tag]
-      // The plaintext key in the biometric header lets list() enumerate
-      // bio items without prompting per blob — names are not secrets.
-      // The encrypted plaintext also carries the key for tamper-detection
-      // (see decodePlain), so a malicious header rewrite is caught.
+      //   none      : [variant=0][hasPp 1B][slotKind 1B][IV][cipher+tag]
+      //   biometric : [variant=1][hasPp 1B][slotKind 1B][window BE]
+      //               [2B keyLen BE][key UTF-8][IV][cipher+tag]
+      // The hasPp + slotKind bytes are plaintext metadata so `metadata()`
+      // can answer "is this passphrase-wrapped, what kind of slot is it"
+      // without an AES decrypt or biometric prompt. The plaintext key in
+      // the biometric header lets list() enumerate bio items without
+      // prompting per blob — names are not secrets.
+      val hasPp: Byte = if (slotKind == BLOB_SLOT_KIND_WRAPPED) 1 else 0
       val keyBytes = if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
         val kb = key.toByteArray(Charsets.UTF_8)
         if (kb.size > KEY_PREFIX_MAX) {
@@ -1106,24 +1138,26 @@ object SecureKVBridge {
       } else null
       val headerLen =
         if (accessControl == ACCESS_CONTROL_BIOMETRIC)
-          VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + (keyBytes?.size ?: 0)
-        else VARIANT_LEN
+          VARIANT_LEN + META_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN +
+            (keyBytes?.size ?: 0)
+        else VARIANT_LEN + META_LEN
       val out = ByteArray(headerLen + iv.size + sealed.size)
-      // Variant byte == AccessControl value: 0 for non-biometric,
-      // 1 for biometric.
       out[0] = if (accessControl == ACCESS_CONTROL_BIOMETRIC)
         BLOB_VARIANT_BIOMETRIC.toByte()
       else
         BLOB_VARIANT_NONE.toByte()
+      out[1] = hasPp
+      out[2] = (slotKind and 0xff).toByte()
       if (accessControl == ACCESS_CONTROL_BIOMETRIC && keyBytes != null) {
-        out[1] = ((window ushr 24) and 0xff).toByte()
-        out[2] = ((window ushr 16) and 0xff).toByte()
-        out[3] = ((window ushr 8) and 0xff).toByte()
-        out[4] = (window and 0xff).toByte()
-        out[5] = ((keyBytes.size ushr 8) and 0xff).toByte()
-        out[6] = (keyBytes.size and 0xff).toByte()
+        out[3] = ((window ushr 24) and 0xff).toByte()
+        out[4] = ((window ushr 16) and 0xff).toByte()
+        out[5] = ((window ushr 8) and 0xff).toByte()
+        out[6] = (window and 0xff).toByte()
+        out[7] = ((keyBytes.size ushr 8) and 0xff).toByte()
+        out[8] = (keyBytes.size and 0xff).toByte()
         System.arraycopy(
-          keyBytes, 0, out, VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN,
+          keyBytes, 0, out,
+          VARIANT_LEN + META_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN,
           keyBytes.size
         )
       }
@@ -1235,6 +1269,53 @@ object SecureKVBridge {
    *   - single-blob auth failures (AEADBadTagException, BadPaddingException)
    *     — silently skipped as orphans of a prior key generation.
    */
+  /**
+   * Returns plaintext metadata for `key` without any auth or AES decrypt.
+   * Result is `IntArray(5)`:
+   *   [0] = exists (0/1)
+   *   [1] = accessControl (0=none, 1=biometric)
+   *   [2] = validityWindowSec
+   *   [3] = hasPassphrase (0/1)
+   *   [4] = slotKind (outer slot tag)
+   * For missing keys returns `[0,0,0,0,0]`. Read directly from the
+   * plaintext blob header — never triggers a biometric prompt or
+   * touches the master key.
+   */
+  @JvmStatic
+  fun metadata(key: String): IntArray {
+    assertSingleProcess()
+    val file = blobFile(key)
+    if (!file.isFile) return intArrayOf(0, 0, 0, 0, 0)
+    // Only need the first few bytes of the header. Read up to 9 to cover
+    // both non-bio (3 bytes) and biometric (9 bytes including window).
+    val needed = VARIANT_LEN + META_LEN + WINDOW_LEN
+    val head = ByteArray(needed)
+    val read = try {
+      RandomAccessFile(file, "r").use { raf ->
+        val n = raf.read(head)
+        if (n < 0) 0 else n
+      }
+    } catch (_: Throwable) {
+      return intArrayOf(0, 0, 0, 0, 0)
+    }
+    if (read < VARIANT_LEN + META_LEN) return intArrayOf(0, 0, 0, 0, 0)
+
+    val variant = head[0].toInt() and 0xff
+    val hasPp = if ((head[1].toInt() and 0xff) != 0) 1 else 0
+    val slotKind = head[2].toInt() and 0xff
+    val window = when (variant) {
+      BLOB_VARIANT_BIOMETRIC -> {
+        if (read < needed) 0 else readBeU32(head, VARIANT_LEN + META_LEN)
+      }
+      else -> 0
+    }
+    val accessControl = when (variant) {
+      BLOB_VARIANT_BIOMETRIC -> ACCESS_CONTROL_BIOMETRIC
+      else -> ACCESS_CONTROL_NONE
+    }
+    return intArrayOf(1, accessControl, window, hasPp, slotKind)
+  }
+
   @JvmStatic
   fun listJoined(): String {
     assertSingleProcess()
@@ -1265,13 +1346,14 @@ object SecureKVBridge {
       } catch (_: Throwable) {
         continue
       }
-      if (blob.size < VARIANT_LEN + IV_LEN + TAG_BITS / 8) continue
+      if (blob.size < VARIANT_LEN + META_LEN + IV_LEN + TAG_BITS / 8) continue
       val variant = blob[0].toInt() and 0xff
 
       val name: String? = when (variant) {
         BLOB_VARIANT_NONE -> {
-          val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
-          val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
+          val iv = blob.copyOfRange(
+            VARIANT_LEN + META_LEN, VARIANT_LEN + META_LEN + IV_LEN)
+          val sealed = blob.copyOfRange(VARIANT_LEN + META_LEN + IV_LEN, blob.size)
           val cipher = Cipher.getInstance("AES/GCM/NoPadding")
           try {
             cipher.init(

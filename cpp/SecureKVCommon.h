@@ -84,6 +84,58 @@ inline BiometricPromptCopy parsePromptCopy(
   return out;
 }
 
+// Optional passphrase string. Missing arg, undefined, null, or empty
+// string all mean "no passphrase". Non-string values throw. The empty
+// distinction lives in the caller — set/get distinguish "no passphrase
+// requested" (item is plaintext slot) from "passphrase wrap required".
+inline std::string parsePassphrase(
+  jsi::Runtime& rt,
+  const char* op,
+  const jsi::Value* args,
+  size_t count,
+  size_t index
+) {
+  if (count <= index) return {};
+  if (args[index].isUndefined() || args[index].isNull()) return {};
+  if (!args[index].isString()) {
+    throw jsi::JSError(rt, std::string(op) + ": passphrase must be a string");
+  }
+  return args[index].getString(rt).utf8(rt);
+}
+
+// Optional passphrase iteration count. Missing / undefined / 0 means
+// "use default". Range is [100k, 10M] mirroring SecureKVPassphrase.h
+// constants; out-of-range throws so callers don't silently get a
+// weaker derivation than asked for.
+inline uint32_t parsePassphraseIters(
+  jsi::Runtime& rt,
+  const char* op,
+  const jsi::Value* args,
+  size_t count,
+  size_t index,
+  uint32_t defaultIters
+) {
+  if (count <= index) return defaultIters;
+  if (args[index].isUndefined() || args[index].isNull()) return defaultIters;
+  if (!args[index].isNumber()) {
+    throw jsi::JSError(
+      rt, std::string(op) + ": passphraseIterations must be a number");
+  }
+  double v = args[index].asNumber();
+  if (v == 0) return defaultIters;
+  if (v != static_cast<double>(static_cast<uint32_t>(v))) {
+    throw jsi::JSError(
+      rt, std::string(op) + ": passphraseIterations must be an integer");
+  }
+  uint32_t iters = static_cast<uint32_t>(v);
+  if (iters < 100'000 || iters > 10'000'000) {
+    throw jsi::JSError(
+      rt, std::string(op) +
+      ": passphraseIterations out of range [100000, 10000000]");
+  }
+  return iters;
+}
+
 inline uint32_t parseValidityWindow(
   jsi::Runtime& rt,
   const char* op,

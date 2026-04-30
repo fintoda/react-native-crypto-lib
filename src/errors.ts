@@ -50,6 +50,50 @@ export class BiometricCanceledError extends CryptoError {
 }
 
 /**
+ * Thrown when a passphrase-wrapped item is read with the wrong
+ * passphrase. The KCV verifier in the envelope catches this *before*
+ * the AES-GCM decrypt attempt, so this error is distinct from data
+ * corruption — see `BackupFormatError` for the latter.
+ *
+ * Native reason starts with `"passphrase: wrong"`.
+ */
+export class WrongPassphraseError extends CryptoError {
+  constructor(fn: string, reason: string) {
+    super(fn, reason);
+    this.name = 'WrongPassphraseError';
+  }
+}
+
+/**
+ * Thrown when an item is passphrase-wrapped but the read call did not
+ * supply a passphrase. The caller should prompt the user and retry the
+ * operation with the entered passphrase.
+ *
+ * Native reason starts with `"passphrase: required"`.
+ */
+export class PassphraseRequiredError extends CryptoError {
+  constructor(fn: string, reason: string) {
+    super(fn, reason);
+    this.name = 'PassphraseRequiredError';
+  }
+}
+
+/**
+ * Thrown when a backup envelope or passphrase-wrapped slot fails to
+ * parse, or its AES-GCM authentication fails *after* a successful KCV
+ * check (indicating data corruption rather than a wrong passphrase).
+ *
+ * Native reason starts with `"backup: "` (malformed input) or
+ * `"backup: data integrity check failed"` (post-verifier GCM failure).
+ */
+export class BackupFormatError extends CryptoError {
+  constructor(fn: string, reason: string) {
+    super(fn, reason);
+    this.name = 'BackupFormatError';
+  }
+}
+
+/**
  * Re-shapes a raw native error into a structured `CryptoError` (or one
  * of its specialised subclasses). Used by both the sync and async
  * wrappers below.
@@ -64,8 +108,19 @@ function upgradeNativeError(e: unknown): never {
   if (idx > 0) {
     const nativeFn = msg.slice(0, idx);
     const reason = msg.slice(idx + 2);
+    // Order matters: more specific reasons first so they don't fall
+    // through to the generic `unavailable` / `CryptoError` branches.
     if (reason.startsWith('user canceled')) {
       throw new BiometricCanceledError(nativeFn, reason);
+    }
+    if (reason.startsWith('passphrase: wrong')) {
+      throw new WrongPassphraseError(nativeFn, reason);
+    }
+    if (reason.startsWith('passphrase: required')) {
+      throw new PassphraseRequiredError(nativeFn, reason);
+    }
+    if (reason.startsWith('backup:')) {
+      throw new BackupFormatError(nativeFn, reason);
     }
     if (nativeFn.startsWith('secure_kv_') && reason.startsWith('unavailable')) {
       throw new SecureKVUnavailableError(nativeFn, reason);

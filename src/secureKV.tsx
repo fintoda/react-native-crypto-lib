@@ -4,11 +4,6 @@ import { type Curve, type EcdsaSignature } from './ecdsa';
 
 export type BiometricPromptOptions = BiometricAuthenticateOptions;
 
-/**
- * Per-item access-control gating. See `secureKV.native.tsx` for the
- * full doc — `'none'` is always allowed; `'biometric'` is iOS-only in
- * Phase 1. Discriminated union for forward compatibility.
- */
 export type AccessControlOptions =
   | { accessControl: 'none' }
   | { accessControl: 'biometric'; validityWindow?: number };
@@ -23,6 +18,27 @@ export type BiometricStatus =
   | 'security_update_required'
   | 'unsupported_os';
 
+export type SecureKVReadOptions = {
+  passphrase?: string;
+  prompt?: BiometricPromptOptions;
+};
+
+export type SecureKVWriteOptions = {
+  accessControl?: AccessControl;
+  validityWindow?: number;
+  passphrase?: string;
+  passphraseIterations?: number;
+  prompt?: BiometricPromptOptions;
+};
+
+export type SecureKVItemMetadata = {
+  exists: boolean;
+  accessControl?: AccessControl;
+  validityWindow?: number;
+  hasPassphrase?: boolean;
+  slotKind?: 'BLOB' | 'SEED' | 'RAW' | 'WRAPPED' | 'UNKNOWN';
+};
+
 const unsupported = async (): Promise<never> => {
   throw new Error(
     "'@fintoda/react-native-crypto-lib' is only supported on native platforms."
@@ -34,12 +50,11 @@ export const secureKV = {
   set: unsupported as (
     key: string,
     value: Uint8Array,
-    options?: AccessControlOptions,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVWriteOptions
   ) => Promise<void>,
   get: unsupported as (
     key: string,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ) => Promise<Uint8Array | null>,
   has: unsupported as (key: string) => Promise<boolean>,
   delete: unsupported as (key: string) => Promise<void>,
@@ -47,62 +62,84 @@ export const secureKV = {
   clear: unsupported as () => Promise<void>,
   isHardwareBacked: unsupported as () => Promise<boolean>,
   biometricStatus: unsupported as () => Promise<BiometricStatus>,
+  metadata: unsupported as (key: string) => Promise<SecureKVItemMetadata>,
+  changePassphrase: unsupported as (
+    key: string,
+    oldPassphrase: string,
+    newPassphrase: string,
+    options?: { iterations?: number; prompt?: BiometricPromptOptions }
+  ) => Promise<void>,
+  changeAccessControl: unsupported as (
+    key: string,
+    newAccessControl: AccessControlOptions,
+    options?: { prompt?: BiometricPromptOptions }
+  ) => Promise<void>,
   invalidateBiometricSession: unsupported as (alias?: string) => Promise<void>,
 
   bip32: {
     setSeed: unsupported as (
       alias: string,
       seed: Uint8Array,
-      options?: AccessControlOptions,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVWriteOptions
     ) => Promise<void>,
     fingerprint: unsupported as (
       alias: string,
       path: string | number[],
       curve: Bip32Curve,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<number>,
     getPublicKey: unsupported as (
       alias: string,
       path: string | number[],
       curve: Bip32Curve,
       compact?: boolean,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signEcdsa: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       curve: Curve,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<EcdsaSignature>,
     signSchnorr: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       aux?: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signSchnorrTaproot: unsupported as (
       alias: string,
       path: string | number[],
       digest: Uint8Array,
       merkleRoot?: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signEd25519: unsupported as (
       alias: string,
       path: string | number[],
       msg: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     ecdh: unsupported as (
       alias: string,
       path: string | number[],
       peerPub: Uint8Array,
       curve: Curve,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
+    exportEncryptedSeed: unsupported as (
+      alias: string,
+      exportPassphrase: string,
+      options?: SecureKVReadOptions & { passphraseIterations?: number }
+    ) => Promise<Uint8Array>,
+    importEncryptedSeed: unsupported as (
+      newAlias: string,
+      envelope: Uint8Array,
+      exportPassphrase: string,
+      options?: SecureKVWriteOptions
+    ) => Promise<void>,
   },
 
   raw: {
@@ -110,40 +147,39 @@ export const secureKV = {
       alias: string,
       priv: Uint8Array,
       curve: Bip32Curve,
-      options?: AccessControlOptions,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVWriteOptions
     ) => Promise<void>,
     getPublicKey: unsupported as (
       alias: string,
       compact?: boolean,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signEcdsa: unsupported as (
       alias: string,
       digest: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<EcdsaSignature>,
     signSchnorr: unsupported as (
       alias: string,
       digest: Uint8Array,
       aux?: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signSchnorrTaproot: unsupported as (
       alias: string,
       digest: Uint8Array,
       merkleRoot?: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     signEd25519: unsupported as (
       alias: string,
       msg: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
     ecdh: unsupported as (
       alias: string,
       peerPub: Uint8Array,
-      prompt?: BiometricPromptOptions
+      options?: SecureKVReadOptions
     ) => Promise<Uint8Array>,
   },
 };

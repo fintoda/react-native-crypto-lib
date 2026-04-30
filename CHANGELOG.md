@@ -9,6 +9,35 @@ and this project adheres to [Conventional Commits](https://www.conventionalcommi
 
 ### Added
 
+- **Per-item passphrase encryption** for `secureKV`. Any item (BLOB,
+  SEED, RAW) can be wrapped in an additional PBKDF2-HMAC-SHA512 +
+  AES-256-GCM envelope with a KCV verifier. Wrong-passphrase vs.
+  data-corruption are distinguishable thanks to the verifier check
+  before AES-GCM, so callers see `WrongPassphraseError` or
+  `BackupFormatError` accordingly. Default 600k PBKDF2 iterations,
+  caller-tunable in `[100k, 10M]`. Wrap layer sits inside the
+  Keychain/Keystore-encrypted blob — defence in depth on top of
+  device-level protection.
+- `secureKV.metadata(key)` — plaintext metadata read with no biometric
+  prompt or AES decrypt. Returns `{ exists, accessControl,
+  validityWindow, hasPassphrase, slotKind }`. UI hint for "should I
+  show a passphrase dialog?".
+- `secureKV.changePassphrase(key, oldPp, newPp, options?)` — in-place
+  re-wrap on the slot layer. `''` for `oldPp` adds a wrap; `''` for
+  `newPp` removes one. Inner slot bytes never cross the JSI boundary.
+  Works for any slot kind.
+- `secureKV.changeAccessControl(key, newAc, options?)` — in-place
+  storage-layer re-wrap. Switches biometric on/off or changes
+  `validityWindow` without parsing the slot.
+- `secureKV.bip32.exportEncryptedSeed(alias, exportPp, options?)` —
+  reads a SEED slot, re-wraps under `exportPp`, returns raw envelope
+  bytes (`Uint8Array`). Caller chooses encoding (base64 / hex / QR).
+  Seed never reaches JS; only the encrypted envelope.
+- `secureKV.bip32.importEncryptedSeed(newAlias, envelope, exportPp, options?)`
+  — decrypts an envelope and stores the SEED slot under `newAlias`,
+  optionally re-wrapping under a new storage passphrase.
+- New error classes: `WrongPassphraseError`, `PassphraseRequiredError`,
+  `BackupFormatError` — exported from the root index.
 - Async (Promise-returning) variants for the heavy crypto primitives.
   `kdf.pbkdf2_sha256`, `kdf.pbkdf2_sha512`, `bip39.toSeed`,
   `slip39.generate`, `slip39.generateGroups`, and `slip39.combine` now
@@ -26,6 +55,35 @@ and this project adheres to [Conventional Commits](https://www.conventionalcommi
 
 ### Changed
 
+- **Breaking**: `secureKV` read methods (`get`, `bip32.fingerprint`,
+  `bip32.getPublicKey`, all `bip32.sign*`, `bip32.ecdh`,
+  `raw.getPublicKey`, all `raw.sign*`, `raw.ecdh`) now take a single
+  `options?: SecureKVReadOptions` bag instead of a trailing
+  `prompt?: BiometricPromptOptions`. Migration:
+  ```ts
+  // before
+  await secureKV.get('key', { title: 'Auth' });
+  await secureKV.bip32.signEcdsa(alias, path, digest, 'secp256k1', { title: 'Sign' });
+  // after
+  await secureKV.get('key', { prompt: { title: 'Auth' } });
+  await secureKV.bip32.signEcdsa(alias, path, digest, 'secp256k1', {
+    prompt: { title: 'Sign' },
+  });
+  ```
+- **Breaking**: `secureKV` write methods (`set`, `bip32.setSeed`,
+  `raw.setPrivate`) now take a single `options?: SecureKVWriteOptions`
+  bag. The new bag is the existing `AccessControlOptions` plus
+  `passphrase` / `passphraseIterations` / `prompt` fields, all
+  optional. Migration:
+  ```ts
+  // before
+  await secureKV.set('key', value, { accessControl: 'biometric' }, { title: 'Save' });
+  // after
+  await secureKV.set('key', value, {
+    accessControl: 'biometric',
+    prompt: { title: 'Save' },
+  });
+  ```
 - **Breaking**: `kdf.pbkdf2_sha{256,512}`, `bip39.toSeed`, and
   `slip39.{generate,generateGroups,combine}` now return Promises.
   Migration:
@@ -34,9 +92,10 @@ and this project adheres to [Conventional Commits](https://www.conventionalcommi
     (e.g. `bip39.toSeedSync(mnemonic)`).
 - iOS `BiometricBackend::authenticate` now times out after 120 s
   instead of waiting forever (mirrors the Android cap).
-- Android secureKV biometric blob format carries a plaintext key
-  prefix in the header so `secureKV.list()` can enumerate biometric
-  entries without prompting.
+- Android secureKV blob header gained 2 plaintext bytes (`hasPassphrase`,
+  `slotKind`) right after the variant byte; iOS `kSecAttrGeneric` grew
+  from 4 to 6 bytes for the same fields. These power the no-prompt
+  `secureKV.metadata()` query.
 
 ## [0.9.0] - 2026-04-12
 

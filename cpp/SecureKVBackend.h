@@ -34,6 +34,20 @@ enum class AccessControl : uint8_t {
   Biometric = 1,
 };
 
+// Plaintext metadata for an item. Returned by `metadata()` without any
+// auth or biometric prompt — populated from header bytes that sit
+// outside the encrypted payload (Android: blob header; iOS: kSecAttrGeneric).
+struct BackendItemMetadata {
+  bool exists = false;
+  AccessControl accessControl = AccessControl::None;
+  uint32_t validityWindowSec = 0;
+  bool hasPassphrase = false;
+  // Outer slot tag (the first byte of slot bytes). 0x00=BLOB, 0x01=SEED,
+  // 0x02=RAW, 0x03=WRAPPED. When wrapped, the inner kind is hidden
+  // behind the passphrase by design.
+  uint8_t slotKind = 0;
+};
+
 // Biometric availability snapshot. Lets callers query whether
 // `accessControl='biometric'` would even work before they try to use it.
 // Strings are stable and used directly by the JS-side enum.
@@ -70,12 +84,17 @@ enum class BiometricStatus {
 // size limits before calling these.
 class SecureKVBackend {
  public:
+  // `slotKind` is the outer slot tag of the bytes being stored. Surfaced
+  // in plaintext metadata so `metadata()` can answer queries about the
+  // item without auth. Backends store it alongside the blob header
+  // (Android) or in `kSecAttrGeneric` (iOS).
   static void set(
     const std::string& key,
     const uint8_t* data,
     size_t len,
     AccessControl ac,
     uint32_t validityWindowSec,  // ignored when ac == None
+    uint8_t slotKind,
     const BiometricPromptCopy& prompt = {}
   );
   static std::optional<std::vector<uint8_t>> get(
@@ -88,6 +107,10 @@ class SecureKVBackend {
   static void clear();
   static bool isHardwareBacked();
   static BiometricStatus biometricStatus();
+
+  // Plaintext metadata read — no biometric prompt, no AES decrypt.
+  // Returns `{ exists = false }` for missing keys.
+  static BackendItemMetadata metadata(const std::string& key);
 
   // Drops any cached biometric authentication for the given alias (or
   // all aliases when `alias` is empty). On iOS this invalidates the

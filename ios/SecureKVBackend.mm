@@ -118,6 +118,7 @@ void SecureKVBackend::set(
   size_t len,
   AccessControl ac,
   uint32_t validityWindowSec,
+  uint8_t slotKind,
   const BiometricPromptCopy& prompt
 ) {
   // The set() path does not show a Keychain prompt itself — provisioning
@@ -165,21 +166,32 @@ void SecureKVBackend::set(
         [[nsErr description] UTF8String]);
     }
     add[(__bridge id)kSecAttrAccessControl] = (__bridge_transfer id)acRef;
-
-    // Stash the validity window in kSecAttrGeneric so we can read it
-    // before the prompt and configure LAContext accordingly. 4 bytes BE.
-    uint8_t windowBuf[4] = {
-      static_cast<uint8_t>((validityWindowSec >> 24) & 0xff),
-      static_cast<uint8_t>((validityWindowSec >> 16) & 0xff),
-      static_cast<uint8_t>((validityWindowSec >> 8) & 0xff),
-      static_cast<uint8_t>(validityWindowSec & 0xff),
-    };
-    add[(__bridge id)kSecAttrGeneric] =
-      [NSData dataWithBytes:windowBuf length:4];
   } else {
     add[(__bridge id)kSecAttrAccessible] =
       (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
   }
+
+  // Plaintext metadata header in kSecAttrGeneric (always 7 bytes):
+  //   [4B window BE][1B has_passphrase][1B slot_kind][1B accessControl]
+  // Read by metadata() and the get() path without triggering biometric.
+  // Window is always written even for non-biometric items (=0) so the
+  // attribute size is uniform and parsing is unconditional.
+  // accessControl is stored explicitly because Keychain returns a
+  // synthetic kSecAttrAccessControl for items added with only
+  // kSecAttrAccessible — checking presence of that attribute is
+  // therefore not a reliable biometric/non-biometric signal.
+  uint8_t hasPp = (slotKind == 0x03) ? 1 : 0;
+  uint8_t metaBuf[7] = {
+    static_cast<uint8_t>((validityWindowSec >> 24) & 0xff),
+    static_cast<uint8_t>((validityWindowSec >> 16) & 0xff),
+    static_cast<uint8_t>((validityWindowSec >> 8) & 0xff),
+    static_cast<uint8_t>(validityWindowSec & 0xff),
+    hasPp,
+    slotKind,
+    static_cast<uint8_t>(ac),
+  };
+  add[(__bridge id)kSecAttrGeneric] =
+    [NSData dataWithBytes:metaBuf length:7];
 
   OSStatus status = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
   if (status != errSecSuccess) {
@@ -215,21 +227,35 @@ std::optional<std::vector<uint8_t>> SecureKVBackend::get(
     throwOSStatus("secureKV.get (attrs)", attrStatus);
   }
   NSDictionary* attrs = (__bridge_transfer NSDictionary*)cfAttrs;
-  NSData* windowAttr = attrs[(__bridge id)kSecAttrGeneric];
+  NSData* metaAttr = attrs[(__bridge id)kSecAttrGeneric];
+  // Read accessControl from the explicit byte at offset 6 in our
+  // metadata blob. Falling back to checking `kSecAttrAccessControl`
+  // presence is unreliable — Keychain synthesises that attribute for
+  // items added with only `kSecAttrAccessible`, so the presence test
+  // returns true even for non-biometric items.
+  bool isBiometric = false;
+  if (metaAttr != nil && metaAttr.length >= 7) {
+    const uint8_t* mb = static_cast<const uint8_t*>(metaAttr.bytes);
+    isBiometric = mb[6] != 0;
+  }
 
   NSMutableDictionary* dataQuery = [baseQuery(key) mutableCopy];
   dataQuery[(__bridge id)kSecReturnData] = @YES;
   dataQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
 
-  if (windowAttr != nil && windowAttr.length == 4) {
-    // Biometric item — decode window, attach a (possibly cached)
-    // LAContext so iOS can skip the prompt within the reuse window.
-    const uint8_t* wb = static_cast<const uint8_t*>(windowAttr.bytes);
-    uint32_t windowSec =
-      (static_cast<uint32_t>(wb[0]) << 24) |
-      (static_cast<uint32_t>(wb[1]) << 16) |
-      (static_cast<uint32_t>(wb[2]) << 8) |
-      static_cast<uint32_t>(wb[3]);
+  if (isBiometric) {
+    // Biometric item — decode window from the 4 BE bytes (first half of
+    // the meta attribute), attach a (possibly cached) LAContext so iOS
+    // can skip the prompt within the reuse window.
+    uint32_t windowSec = 0;
+    if (metaAttr != nil && metaAttr.length >= 4) {
+      const uint8_t* wb = static_cast<const uint8_t*>(metaAttr.bytes);
+      windowSec =
+        (static_cast<uint32_t>(wb[0]) << 24) |
+        (static_cast<uint32_t>(wb[1]) << 16) |
+        (static_cast<uint32_t>(wb[2]) << 8) |
+        static_cast<uint32_t>(wb[3]);
+    }
     LAContext* ctx = contextForRead(nsString(key), windowSec);
     dataQuery[(__bridge id)kSecUseAuthenticationContext] = ctx;
     // iOS surfaces a single user-visible message in the Keychain
@@ -330,6 +356,64 @@ void SecureKVBackend::clear() {
   if (status != errSecSuccess && status != errSecItemNotFound) {
     throwOSStatus("secureKV.clear", status);
   }
+}
+
+BackendItemMetadata SecureKVBackend::metadata(const std::string& key) {
+  // Attribute-only Keychain query with kSecUseAuthenticationUISkip — on
+  // biometric items this returns the attributes (incl. our 6-byte
+  // kSecAttrGeneric blob) without ever showing a prompt. Same path as
+  // has() / get()'s first pass.
+  NSMutableDictionary* attrQuery = [baseQuery(key) mutableCopy];
+  attrQuery[(__bridge id)kSecReturnAttributes] = @YES;
+  attrQuery[(__bridge id)kSecReturnData] = @NO;
+  attrQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+  attrQuery[(__bridge id)kSecUseAuthenticationUI] =
+    (__bridge id)kSecUseAuthenticationUISkip;
+
+  CFTypeRef cfAttrs = NULL;
+  OSStatus status =
+    SecItemCopyMatching((__bridge CFDictionaryRef)attrQuery, &cfAttrs);
+  BackendItemMetadata out;
+  if (status == errSecItemNotFound) {
+    return out;
+  }
+  if (status == errSecInteractionNotAllowed) {
+    // Attribute-only query never needs interaction, so this should not
+    // happen in practice. Treat as exists with unknown details rather
+    // than throwing — the caller can still issue an auth'd read.
+    out.exists = true;
+    return out;
+  }
+  if (status != errSecSuccess) {
+    throwOSStatus("secureKV.metadata", status);
+  }
+
+  NSDictionary* attrs = (__bridge_transfer NSDictionary*)cfAttrs;
+  out.exists = true;
+  // Default to None; the explicit accessControl byte in kSecAttrGeneric
+  // overrides below. (Don't use `kSecAttrAccessControl` presence —
+  // Keychain returns a synthetic value for items added with only
+  // kSecAttrAccessible.)
+  out.accessControl = AccessControl::None;
+
+  NSData* metaAttr = attrs[(__bridge id)kSecAttrGeneric];
+  if (metaAttr != nil) {
+    const uint8_t* mb = static_cast<const uint8_t*>(metaAttr.bytes);
+    NSUInteger n = metaAttr.length;
+    if (n >= 4) {
+      out.validityWindowSec =
+        (static_cast<uint32_t>(mb[0]) << 24) |
+        (static_cast<uint32_t>(mb[1]) << 16) |
+        (static_cast<uint32_t>(mb[2]) << 8) |
+        static_cast<uint32_t>(mb[3]);
+    }
+    if (n >= 5) out.hasPassphrase = mb[4] != 0;
+    if (n >= 6) out.slotKind = mb[5];
+    if (n >= 7) {
+      out.accessControl = static_cast<AccessControl>(mb[6]);
+    }
+  }
+  return out;
 }
 
 bool SecureKVBackend::isHardwareBacked() {

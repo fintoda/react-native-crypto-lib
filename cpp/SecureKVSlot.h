@@ -17,6 +17,11 @@
 //        Payload = [1B curve_tag][32B priv]. curve_tag = 0=secp256k1,
 //        1=nist256p1, 2=ed25519. The curve is fixed at provisioning time
 //        so sign-side methods can reject mismatches before touching crypto.
+// 0x03 — PassphraseWrapped: a passphrase-encrypted envelope holding one
+//        of the above slot kinds. Payload = [1B version][4B iters BE]
+//        [16B salt][12B IV][16B verifier][AES-GCM ciphertext+16B tag].
+//        See cpp/SecureKVPassphrase.h for envelope format and the
+//        wrap/unwrap helpers.
 //
 // This header is the single source of truth for the format; both
 // cpp/SecureKV.cpp (set/get/has/list/clear/delete) and cpp/SecureKVSign.cpp
@@ -28,6 +33,7 @@ enum class SlotKind : uint8_t {
   Blob = 0x00,
   Bip32Seed = 0x01,
   RawPrivate = 0x02,
+  PassphraseWrapped = 0x03,
 };
 
 // BIP-32 / SLIP-10 accept seeds of 128 to 512 bits. We mirror that
@@ -47,6 +53,7 @@ inline const char* slotKindName(SlotKind k) {
     case SlotKind::Blob: return "BLOB";
     case SlotKind::Bip32Seed: return "SEED";
     case SlotKind::RawPrivate: return "RAW";
+    case SlotKind::PassphraseWrapped: return "WRAPPED";
   }
   return "UNKNOWN";
 }

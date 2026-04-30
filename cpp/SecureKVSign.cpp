@@ -31,6 +31,7 @@
 #include "SchnorrInternal.h"
 #include "SecureKVBackend.h"
 #include "SecureKVCommon.h"
+#include "SecureKVPassphrase.h"
 #include "SecureKVSlot.h"
 
 #include <cstring>
@@ -86,15 +87,34 @@ struct ScrubbedSlot {
 // Used inside bgWork (worker thread) — throws std::runtime_error rather
 // than jsi::JSError because no jsi::Runtime is available here. The
 // caught message is propagated back to JS by makePromiseAsync.
+//
+// Transparent passphrase unwrap: if the outer slot is PassphraseWrapped,
+// `passphrase` is required and the returned ScrubbedSlot.bytes hold the
+// inner slot (post-decrypt). Callers that don't care about wrapping
+// just see the inner slot kind.
 ScrubbedSlot loadSlotOrThrow(
   const std::string& alias,
-  const BiometricPromptCopy& prompt = {}
+  const BiometricPromptCopy& prompt = {},
+  const std::string& passphrase = ""
 ) {
   auto raw = SecureKVBackend::get(alias, prompt);
   if (!raw.has_value()) {
     throw std::runtime_error("key not found");
   }
-  return ScrubbedSlot{std::move(*raw)};
+  ScrubbedSlot blob{std::move(*raw)};
+  // Peek at the outer slot tag without parsing into payload — we just
+  // need the kind to decide whether to unwrap.
+  if (!blob.bytes.empty() &&
+      blob.bytes[0] == static_cast<uint8_t>(SlotKind::PassphraseWrapped)) {
+    if (passphrase.empty()) {
+      throw std::runtime_error("passphrase: required");
+    }
+    auto inner = unwrapPassphraseEnvelope(
+      blob.bytes.data(), blob.bytes.size(), passphrase);
+    // Move inner over outer; ScrubbedSlot dtor will zero the inner bytes.
+    blob.bytes = std::move(inner);
+  }
+  return blob;
 }
 
 void parseSlotOrThrow(const ScrubbedSlot& blob, SlotView& out) {
@@ -219,9 +239,10 @@ void loadRawKey(
   const std::string& alias,
   RawKey& out,
   int requiredCurveTag, /* -1 = any */
-  const BiometricPromptCopy& prompt = {}
+  const BiometricPromptCopy& prompt = {},
+  const std::string& passphrase = ""
 ) {
-  ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+  ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
   SlotView slot;
   parseSlotOrThrow(blob, slot);
   requireSlotKind(slot, SlotKind::RawPrivate);
@@ -262,20 +283,39 @@ jsi::Value invoke_bip32_set_seed(
     AccessControl ac = parseAccessControl(rt, op, acStr);
     uint32_t window = parseValidityWindow(rt, op, args, count, 3);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
-    std::vector<uint8_t> wrapped = wrapSeedSlot(seed.data(rt), len);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 7);
+    uint32_t iters = parsePassphraseIters(rt, op, args, count, 8, kKdfDefaultIters);
+
+    std::vector<uint8_t> innerSlot = wrapSeedSlot(seed.data(rt), len);
+    std::vector<uint8_t> stored;
+    uint8_t slotKind;
+    if (passphrase.empty()) {
+      stored = std::move(innerSlot);
+      slotKind = static_cast<uint8_t>(SlotKind::Bip32Seed);
+    } else {
+      try {
+        stored = wrapPassphraseEnvelope(
+          innerSlot.data(), innerSlot.size(), passphrase, iters);
+      } catch (...) {
+        memzero(innerSlot.data(), innerSlot.size());
+        throw;
+      }
+      memzero(innerSlot.data(), innerSlot.size());
+      slotKind = static_cast<uint8_t>(SlotKind::PassphraseWrapped);
+    }
 
     return makePromiseAsync<bool>(
       rt, op,
-      [alias = std::move(alias), wrapped = std::move(wrapped), ac, window,
+      [alias = std::move(alias), stored = std::move(stored), ac, window, slotKind,
        prompt = std::move(prompt)]() mutable -> bool {
         try {
           SecureKVBackend::set(
-            alias, wrapped.data(), wrapped.size(), ac, window, prompt);
+            alias, stored.data(), stored.size(), ac, window, slotKind, prompt);
         } catch (...) {
-          memzero(wrapped.data(), wrapped.size());
+          memzero(stored.data(), stored.size());
           throw;
         }
-        memzero(wrapped.data(), wrapped.size());
+        memzero(stored.data(), stored.size());
         return true;
       },
       [](jsi::Runtime&, bool&&) -> jsi::Value { return jsi::Value::undefined(); }
@@ -298,12 +338,14 @@ jsi::Value invoke_bip32_fingerprint(
     }
     PathArg p = readPath(rt, op, path);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 6);
 
     return makePromiseAsync<uint32_t>(
       rt, op,
       [alias = std::move(alias), p = std::move(p), curveTag,
-       prompt = std::move(prompt)]() -> uint32_t {
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> uint32_t {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -341,12 +383,14 @@ jsi::Value invoke_bip32_get_public(
       throw jsi::JSError(rt, std::string(op) + ": unknown curve");
     }
     PathArg p = readPath(rt, op, path);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 7);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), p = std::move(p), curveTag, compact,
-       prompt = std::move(prompt)]() -> ByteVec {
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -408,14 +452,16 @@ jsi::Value invoke_bip32_sign_ecdsa(
     }
     PathArg p = readPath(rt, op, path);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 7);
     ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), p = std::move(p),
        digestBytes = std::move(digestBytes),
-       curveTag, curve, prompt = std::move(prompt)]() -> ByteVec {
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+       curveTag, curve, prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -477,6 +523,7 @@ jsi::Value invoke_bip32_sign_schnorr_impl(
     }
     PathArg p = readPath(rt, op, path);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 7);
     ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
 
     return makePromiseAsync<ByteVec>(
@@ -484,8 +531,9 @@ jsi::Value invoke_bip32_sign_schnorr_impl(
       [alias = std::move(alias), p = std::move(p),
        digestBytes = std::move(digestBytes),
        extraBytes = std::move(extraBytes), hasExtra, taproot,
-       prompt = std::move(prompt)]() -> ByteVec {
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -556,6 +604,7 @@ jsi::Value invoke_bip32_sign_ed25519(
     auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 2);
     PathArg p = readPath(rt, op, path);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 6);
     ByteVec msgBytes;
     msgBytes.assign(safeData(rt, msg), safeData(rt, msg) + msg.size(rt));
 
@@ -563,8 +612,9 @@ jsi::Value invoke_bip32_sign_ed25519(
       rt, op,
       [alias = std::move(alias), p = std::move(p),
        msgBytes = std::move(msgBytes),
-       prompt = std::move(prompt)]() -> ByteVec {
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -613,14 +663,16 @@ jsi::Value invoke_bip32_ecdh(
     }
     PathArg p = readPath(rt, op, path);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 7);
     ByteVec pubBytes(pub.data(rt), pub.data(rt) + publen);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), p = std::move(p), pubBytes = std::move(pubBytes),
-       curveTag, curve, prompt = std::move(prompt)]() -> ByteVec {
+       curveTag, curve, prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         (void)curveTag;
-        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt, passphrase);
         SlotView slot;
         parseSlotOrThrow(blob, slot);
         requireSlotKind(slot, SlotKind::Bip32Seed);
@@ -687,20 +739,39 @@ jsi::Value invoke_raw_set_private(
     AccessControl ac = parseAccessControl(rt, op, acStr);
     uint32_t window = parseValidityWindow(rt, op, args, count, 4);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 5);
-    std::vector<uint8_t> wrapped = wrapRawSlot(curveTag, priv.data(rt));
+    std::string passphrase = parsePassphrase(rt, op, args, count, 8);
+    uint32_t iters = parsePassphraseIters(rt, op, args, count, 9, kKdfDefaultIters);
+
+    std::vector<uint8_t> innerSlot = wrapRawSlot(curveTag, priv.data(rt));
+    std::vector<uint8_t> stored;
+    uint8_t slotKind;
+    if (passphrase.empty()) {
+      stored = std::move(innerSlot);
+      slotKind = static_cast<uint8_t>(SlotKind::RawPrivate);
+    } else {
+      try {
+        stored = wrapPassphraseEnvelope(
+          innerSlot.data(), innerSlot.size(), passphrase, iters);
+      } catch (...) {
+        memzero(innerSlot.data(), innerSlot.size());
+        throw;
+      }
+      memzero(innerSlot.data(), innerSlot.size());
+      slotKind = static_cast<uint8_t>(SlotKind::PassphraseWrapped);
+    }
 
     return makePromiseAsync<bool>(
       rt, op,
-      [alias = std::move(alias), wrapped = std::move(wrapped), ac, window,
+      [alias = std::move(alias), stored = std::move(stored), ac, window, slotKind,
        prompt = std::move(prompt)]() mutable -> bool {
         try {
           SecureKVBackend::set(
-            alias, wrapped.data(), wrapped.size(), ac, window, prompt);
+            alias, stored.data(), stored.size(), ac, window, slotKind, prompt);
         } catch (...) {
-          memzero(wrapped.data(), wrapped.size());
+          memzero(stored.data(), stored.size());
           throw;
         }
-        memzero(wrapped.data(), wrapped.size());
+        memzero(stored.data(), stored.size());
         return true;
       },
       [](jsi::Runtime&, bool&&) -> jsi::Value { return jsi::Value::undefined(); }
@@ -717,13 +788,15 @@ jsi::Value invoke_raw_get_public(
     requireValidKey(rt, op, alias);
     bool compact = requireBoolAt(rt, op, "compact", args, count, 1);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 5);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), compact,
-       prompt = std::move(prompt)]() -> ByteVec {
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         RawKey k;
-        loadRawKey(alias, k, -1, prompt);
+        loadRawKey(alias, k, -1, prompt, passphrase);
 
         ByteVec out;
         if (k.curveTag == kCurveTagEd25519) {
@@ -762,14 +835,16 @@ jsi::Value invoke_raw_sign_ecdsa(
       throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
     }
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 5);
     ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), digestBytes = std::move(digestBytes),
-       prompt = std::move(prompt)]() -> ByteVec {
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         RawKey k;
-        loadRawKey(alias, k, -1, prompt);
+        loadRawKey(alias, k, -1, prompt, passphrase);
         if (k.curveTag != kCurveTagSecp256k1 &&
             k.curveTag != kCurveTagNist256p1) {
           memzero(&k, sizeof(k));
@@ -823,6 +898,7 @@ jsi::Value invoke_raw_sign_schnorr_impl(
       hasExtra = true;
     }
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 6);
     ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
 
     return makePromiseAsync<ByteVec>(
@@ -830,9 +906,10 @@ jsi::Value invoke_raw_sign_schnorr_impl(
       [alias = std::move(alias),
        digestBytes = std::move(digestBytes),
        extraBytes = std::move(extraBytes), hasExtra, taproot,
-       prompt = std::move(prompt)]() -> ByteVec {
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         RawKey k;
-        loadRawKey(alias, k, kCurveTagSecp256k1, prompt);
+        loadRawKey(alias, k, kCurveTagSecp256k1, prompt, passphrase);
 
         uint8_t signingPriv[32];
         const uint8_t* extraPtr = hasExtra ? extraBytes.data() : nullptr;
@@ -891,15 +968,17 @@ jsi::Value invoke_raw_sign_ed25519(
     requireValidKey(rt, op, alias);
     auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 1);
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 5);
     ByteVec msgBytes;
     msgBytes.assign(safeData(rt, msg), safeData(rt, msg) + msg.size(rt));
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), msgBytes = std::move(msgBytes),
-       prompt = std::move(prompt)]() -> ByteVec {
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         RawKey k;
-        loadRawKey(alias, k, kCurveTagEd25519, prompt);
+        loadRawKey(alias, k, kCurveTagEd25519, prompt, passphrase);
 
         ByteVec out(64);
         const uint8_t kEmpty = 0;
@@ -928,14 +1007,16 @@ jsi::Value invoke_raw_ecdh(
       throw jsi::JSError(rt, std::string(op) + ": peerPub must be 33 or 65 bytes");
     }
     BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    std::string passphrase = parsePassphrase(rt, op, args, count, 5);
     ByteVec pubBytes(pub.data(rt), pub.data(rt) + publen);
 
     return makePromiseAsync<ByteVec>(
       rt, op,
       [alias = std::move(alias), pubBytes = std::move(pubBytes),
-       prompt = std::move(prompt)]() -> ByteVec {
+       prompt = std::move(prompt),
+       passphrase = std::move(passphrase)]() -> ByteVec {
         RawKey k;
-        loadRawKey(alias, k, -1, prompt);
+        loadRawKey(alias, k, -1, prompt, passphrase);
         if (k.curveTag != kCurveTagSecp256k1 &&
             k.curveTag != kCurveTagNist256p1) {
           memzero(&k, sizeof(k));
@@ -968,23 +1049,23 @@ jsi::Value invoke_raw_ecdh(
 void registerSecureKVSignMethods(MethodMap& map) {
   // BIP-32 / SLIP-10 derivation on a stored seed.
   // ArgCount = base + 3 prompt strings (title, subtitle, cancelLabel).
-  map.push_back({"secure_kv_bip32_set_seed",            7, invoke_bip32_set_seed});
-  map.push_back({"secure_kv_bip32_fingerprint",         6, invoke_bip32_fingerprint});
-  map.push_back({"secure_kv_bip32_get_public",          7, invoke_bip32_get_public});
-  map.push_back({"secure_kv_bip32_sign_ecdsa",          7, invoke_bip32_sign_ecdsa});
-  map.push_back({"secure_kv_bip32_sign_schnorr",        7, invoke_bip32_sign_schnorr});
-  map.push_back({"secure_kv_bip32_sign_schnorr_taproot",7, invoke_bip32_sign_schnorr_taproot});
-  map.push_back({"secure_kv_bip32_sign_ed25519",        6, invoke_bip32_sign_ed25519});
-  map.push_back({"secure_kv_bip32_ecdh",                7, invoke_bip32_ecdh});
+  map.push_back({"secure_kv_bip32_set_seed",            9, invoke_bip32_set_seed});
+  map.push_back({"secure_kv_bip32_fingerprint",         7, invoke_bip32_fingerprint});
+  map.push_back({"secure_kv_bip32_get_public",          8, invoke_bip32_get_public});
+  map.push_back({"secure_kv_bip32_sign_ecdsa",          8, invoke_bip32_sign_ecdsa});
+  map.push_back({"secure_kv_bip32_sign_schnorr",        8, invoke_bip32_sign_schnorr});
+  map.push_back({"secure_kv_bip32_sign_schnorr_taproot",8, invoke_bip32_sign_schnorr_taproot});
+  map.push_back({"secure_kv_bip32_sign_ed25519",        7, invoke_bip32_sign_ed25519});
+  map.push_back({"secure_kv_bip32_ecdh",                8, invoke_bip32_ecdh});
 
   // Raw 32-byte private key without derivation.
-  map.push_back({"secure_kv_raw_set_private",           8, invoke_raw_set_private});
-  map.push_back({"secure_kv_raw_get_public",            5, invoke_raw_get_public});
-  map.push_back({"secure_kv_raw_sign_ecdsa",            5, invoke_raw_sign_ecdsa});
-  map.push_back({"secure_kv_raw_sign_schnorr",          6, invoke_raw_sign_schnorr});
-  map.push_back({"secure_kv_raw_sign_schnorr_taproot",  6, invoke_raw_sign_schnorr_taproot});
-  map.push_back({"secure_kv_raw_sign_ed25519",          5, invoke_raw_sign_ed25519});
-  map.push_back({"secure_kv_raw_ecdh",                  5, invoke_raw_ecdh});
+  map.push_back({"secure_kv_raw_set_private",          10, invoke_raw_set_private});
+  map.push_back({"secure_kv_raw_get_public",            6, invoke_raw_get_public});
+  map.push_back({"secure_kv_raw_sign_ecdsa",            6, invoke_raw_sign_ecdsa});
+  map.push_back({"secure_kv_raw_sign_schnorr",          7, invoke_raw_sign_schnorr});
+  map.push_back({"secure_kv_raw_sign_schnorr_taproot",  7, invoke_raw_sign_schnorr_taproot});
+  map.push_back({"secure_kv_raw_sign_ed25519",          6, invoke_raw_sign_ed25519});
+  map.push_back({"secure_kv_raw_ecdh",                  6, invoke_raw_ecdh});
 }
 
 }  // namespace facebook::react::cryptolib

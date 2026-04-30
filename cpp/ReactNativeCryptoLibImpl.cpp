@@ -32,6 +32,7 @@ ReactNativeCryptoLibImpl::ReactNativeCryptoLibImpl(
   cryptolib::registerSlip39Methods(entries);
   cryptolib::registerSecureKVMethods(entries);
   cryptolib::registerSecureKVSignMethods(entries);
+  cryptolib::registerSecureKVBackupMethods(entries);
   cryptolib::registerBiometricMethods(entries);
 
   for (const auto& e : entries) {

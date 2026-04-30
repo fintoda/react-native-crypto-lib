@@ -298,6 +298,11 @@ export interface RawSpec {
    *  for the biometric variant; 0 = per-call prompt.
    *  promptTitle / promptSubtitle / promptCancel are platform copy for
    *  the biometric prompt — empty string falls back to defaults. */
+  /** `passphrase` (empty string = no wrap) layers an additional
+   *  PBKDF2+AES-GCM envelope around the slot bytes before storage,
+   *  defending against device + biometric bypass. `passphraseIterations`
+   *  is the PBKDF2 cost stored in the envelope header (default 600 000;
+   *  range [100 000, 10 000 000]); ignored when `passphrase` is empty. */
   secure_kv_set(
     key: string,
     value: ArrayBuffer,
@@ -305,13 +310,20 @@ export interface RawSpec {
     validityWindow: number,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string,
+    passphraseIterations: number
   ): Promise<void>;
+  /** `passphrase` (empty = none) is required iff the stored item is
+   *  passphrase-wrapped; rejects with `"passphrase: required"` if the
+   *  outer slot is wrapped and `passphrase` is empty, `"passphrase: wrong"`
+   *  if it doesn't match. */
   secure_kv_get(
     key: string,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer | null>;
   secure_kv_has(key: string): Promise<boolean>;
   secure_kv_delete(key: string): Promise<void>;
@@ -320,11 +332,45 @@ export interface RawSpec {
   secure_kv_is_hardware_backed(): Promise<boolean>;
   /** Returns one of `BiometricStatus`'s enum values as a string. */
   secure_kv_biometric_status(): Promise<string>;
+  /** Plaintext metadata read; never triggers a biometric prompt or AES
+   *  decrypt. Returns an object with `exists`, `accessControl`,
+   *  `validityWindow`, `hasPassphrase`, `slotKind`. For missing keys,
+   *  only `exists: false` is set. */
+  secure_kv_metadata(key: string): Promise<{
+    exists: boolean;
+    accessControl?: string;
+    validityWindow?: number;
+    hasPassphrase?: boolean;
+    slotKind?: string;
+  }>;
   /** Drops cached biometric auth for the given alias (empty string = all
    *  aliases). iOS-only effect: invalidates the per-alias `LAContext`.
    *  No-op on Android — Keystore validity windows can't be cleared from
    *  userland; callers wait for expiry or use `validityWindow: 0`. */
   secure_kv_invalidate_session(alias: string): Promise<void>;
+  /** Re-wraps `key`'s slot bytes in place. `oldPassphrase` empty = item
+   *  not currently wrapped; `newPassphrase` empty = remove wrap. The
+   *  inner slot bytes never cross the JSI boundary. */
+  secure_kv_change_passphrase(
+    key: string,
+    oldPassphrase: string,
+    newPassphrase: string,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string,
+    newPassphraseIterations: number
+  ): Promise<void>;
+  /** Switches biometric on/off (or changes `validityWindow`) without
+   *  parsing or extracting the slot. The blob bytes pass through C++
+   *  between the old and new master key. */
+  secure_kv_change_access_control(
+    key: string,
+    accessControl: string,
+    validityWindow: number,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
+  ): Promise<void>;
 
   /**
    * Native-only signing on top of secureKV slots.
@@ -354,7 +400,9 @@ export interface RawSpec {
     validityWindow: number,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string,
+    passphraseIterations: number
   ): Promise<void>;
   secure_kv_bip32_fingerprint(
     key: string,
@@ -362,7 +410,8 @@ export interface RawSpec {
     curve: string,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<number>;
   secure_kv_bip32_get_public(
     key: string,
@@ -371,7 +420,8 @@ export interface RawSpec {
     compact: boolean,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ecdsa(
     key: string,
@@ -380,7 +430,8 @@ export interface RawSpec {
     curve: string,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr(
     key: string,
@@ -389,7 +440,8 @@ export interface RawSpec {
     aux: ArrayBuffer | null,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr_taproot(
     key: string,
@@ -398,7 +450,8 @@ export interface RawSpec {
     merkleRoot: ArrayBuffer | null,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ed25519(
     key: string,
@@ -406,7 +459,8 @@ export interface RawSpec {
     msg: ArrayBuffer,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_ecdh(
     key: string,
@@ -415,8 +469,37 @@ export interface RawSpec {
     curve: string,
     promptTitle: string,
     promptSubtitle: string,
+    promptCancel: string,
+    passphrase: string
+  ): Promise<ArrayBuffer>;
+
+  /** Reads a SEED slot (auth + optional unwrap with `storagePassphrase`)
+   *  and re-wraps it under `exportPassphrase`. Returns the envelope as
+   *  raw bytes — caller chooses base64/hex/QR encoding. */
+  secure_kv_bip32_export_seed(
+    key: string,
+    exportPassphrase: string,
+    storagePassphrase: string,
+    exportIterations: number,
+    promptTitle: string,
+    promptSubtitle: string,
     promptCancel: string
   ): Promise<ArrayBuffer>;
+  /** Decrypts an export envelope and writes the SEED slot under `key`.
+   *  If `storagePassphrase` is non-empty, re-wraps it under storage
+   *  layer too. */
+  secure_kv_bip32_import_seed(
+    key: string,
+    envelope: ArrayBuffer,
+    exportPassphrase: string,
+    accessControl: string,
+    validityWindow: number,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string,
+    storagePassphrase: string,
+    storageIterations: number
+  ): Promise<void>;
 
   secure_kv_raw_set_private(
     key: string,
@@ -426,21 +509,25 @@ export interface RawSpec {
     validityWindow: number,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string,
+    passphraseIterations: number
   ): Promise<void>;
   secure_kv_raw_get_public(
     key: string,
     compact: boolean,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ecdsa(
     key: string,
     digest: ArrayBuffer,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr(
     key: string,
@@ -448,7 +535,8 @@ export interface RawSpec {
     aux: ArrayBuffer | null,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr_taproot(
     key: string,
@@ -456,21 +544,24 @@ export interface RawSpec {
     merkleRoot: ArrayBuffer | null,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ed25519(
     key: string,
     msg: ArrayBuffer,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_ecdh(
     key: string,
     peerPub: ArrayBuffer,
     promptTitle: string,
     promptSubtitle: string,
-    promptCancel: string
+    promptCancel: string,
+    passphrase: string
   ): Promise<ArrayBuffer>;
 
   /**

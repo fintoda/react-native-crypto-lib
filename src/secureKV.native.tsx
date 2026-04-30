@@ -67,10 +67,109 @@ export type BiometricStatus =
   | 'security_update_required'
   | 'unsupported_os';
 
-const DEFAULT_AC: AccessControlOptions = { accessControl: 'none' };
+/**
+ * Options bag for read-side `secureKV` calls (get, sign, ecdh, etc.).
+ *
+ * - `passphrase` — required iff the item is passphrase-wrapped. A wrong
+ *   value rejects with `WrongPassphraseError`; a missing one with
+ *   `PassphraseRequiredError`.
+ * - `prompt` — UI copy for the biometric prompt; only relevant if the
+ *   item itself is gated by `accessControl: 'biometric'`.
+ */
+export type SecureKVReadOptions = {
+  passphrase?: string;
+  prompt?: BiometricPromptOptions;
+};
 
-function windowOf(opts: AccessControlOptions): number {
+/**
+ * Options bag for write-side calls (set, setSeed, setPrivate). All fields
+ * are optional — `accessControl` defaults to `'none'`.
+ *
+ * - `accessControl` / `validityWindow` — same semantics as
+ *   {@link AccessControlOptions} (kept flat here for ergonomic write-
+ *   options usage where any field can be omitted; passing
+ *   `validityWindow` with `accessControl: 'none'` is harmless — the
+ *   native side ignores it).
+ * - `passphrase` — when non-empty, the slot bytes are wrapped in a
+ *   PBKDF2+AES-GCM envelope before storage. Reading the item later
+ *   requires the same passphrase (in addition to any biometric prompt).
+ * - `passphraseIterations` — PBKDF2 cost stored in the envelope header.
+ *   Default `600 000` (mirrors 1Password / LastPass defaults). Range
+ *   `[100 000, 10 000 000]`. Higher = more brute-force resistant but
+ *   slower derivation. Ignored when `passphrase` is empty.
+ */
+export type SecureKVWriteOptions = {
+  accessControl?: AccessControl;
+  validityWindow?: number;
+  passphrase?: string;
+  passphraseIterations?: number;
+  prompt?: BiometricPromptOptions;
+};
+
+/**
+ * Plaintext metadata for an item, returned by {@link secureKV.metadata}.
+ * Read without any biometric prompt or AES decrypt.
+ *
+ * Returns `{ exists: false }` for missing keys; otherwise carries the
+ * outer access-control gating, validity window, whether the slot is
+ * passphrase-wrapped, and the outer slot kind. When `slotKind` is
+ * `'WRAPPED'` the inner kind (BLOB / SEED / RAW) is intentionally not
+ * exposed — that's part of what the passphrase protects.
+ */
+export type SecureKVItemMetadata = {
+  exists: boolean;
+  accessControl?: AccessControl;
+  validityWindow?: number;
+  hasPassphrase?: boolean;
+  slotKind?: 'BLOB' | 'SEED' | 'RAW' | 'WRAPPED' | 'UNKNOWN';
+};
+
+const DEFAULT_WRITE: SecureKVWriteOptions = {};
+
+function acOf(opts: SecureKVWriteOptions): AccessControl {
+  return opts.accessControl ?? 'none';
+}
+
+function windowOf(opts: {
+  accessControl?: AccessControl;
+  validityWindow?: number;
+}): number {
   return opts.accessControl === 'biometric' ? (opts.validityWindow ?? 0) : 0;
+}
+
+// --- arg encoding helpers --------------------------------------------------
+// Native thunks take a fixed positional shape that combines biometric
+// prompt copy + passphrase fields. Keep the encoding here so the body
+// of every wrapper stays one-liner.
+
+function readArgs(
+  o?: SecureKVReadOptions
+): readonly [string, string, string, string] {
+  const [t, s, c] = promptArgs(o?.prompt);
+  return [t, s, c, o?.passphrase ?? ''];
+}
+
+function writeArgs(
+  o: SecureKVWriteOptions
+): readonly [
+  /* accessControl */ string,
+  /* validityWindow */ number,
+  /* prompt title    */ string,
+  /* prompt subtitle */ string,
+  /* prompt cancel   */ string,
+  /* passphrase      */ string,
+  /* passphraseIters */ number,
+] {
+  const [t, s, c] = promptArgs(o.prompt);
+  return [
+    acOf(o),
+    windowOf(o),
+    t,
+    s,
+    c,
+    o.passphrase ?? '',
+    o.passphraseIterations ?? 0,
+  ];
 }
 
 // --- generic blob slot (tag 0x00) ------------------------------------------
@@ -79,25 +178,18 @@ const set = wrapNativeAsync(
   async (
     key: string,
     value: Uint8Array,
-    options: AccessControlOptions = DEFAULT_AC,
-    prompt?: BiometricPromptOptions
+    options: SecureKVWriteOptions = DEFAULT_WRITE
   ): Promise<void> => {
-    await raw.secure_kv_set(
-      key,
-      toArrayBuffer(value),
-      options.accessControl,
-      windowOf(options),
-      ...promptArgs(prompt)
-    );
+    await raw.secure_kv_set(key, toArrayBuffer(value), ...writeArgs(options));
   }
 );
 
 const get = wrapNativeAsync(
   async (
     key: string,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array | null> => {
-    const buf = await raw.secure_kv_get(key, ...promptArgs(prompt));
+    const buf = await raw.secure_kv_get(key, ...readArgs(options));
     return buf === null ? null : new Uint8Array(buf);
   }
 );
@@ -125,9 +217,58 @@ const biometricStatus = wrapNativeAsync(
     (await raw.secure_kv_biometric_status()) as BiometricStatus
 );
 
+const metadata = wrapNativeAsync(
+  async (key: string): Promise<SecureKVItemMetadata> => {
+    const m = await raw.secure_kv_metadata(key);
+    if (!m.exists) return { exists: false };
+    return {
+      exists: true,
+      accessControl: m.accessControl as AccessControl,
+      validityWindow: m.validityWindow,
+      hasPassphrase: m.hasPassphrase,
+      slotKind: m.slotKind as SecureKVItemMetadata['slotKind'],
+    };
+  }
+);
+
 const invalidateBiometricSession = wrapNativeAsync(
   async (alias?: string): Promise<void> =>
     raw.secure_kv_invalidate_session(alias ?? '')
+);
+
+const changePassphrase = wrapNativeAsync(
+  async (
+    key: string,
+    oldPassphrase: string,
+    newPassphrase: string,
+    options?: {
+      iterations?: number;
+      prompt?: BiometricPromptOptions;
+    }
+  ): Promise<void> => {
+    await raw.secure_kv_change_passphrase(
+      key,
+      oldPassphrase,
+      newPassphrase,
+      ...promptArgs(options?.prompt),
+      options?.iterations ?? 0
+    );
+  }
+);
+
+const changeAccessControl = wrapNativeAsync(
+  async (
+    key: string,
+    newAccessControl: AccessControlOptions,
+    options?: { prompt?: BiometricPromptOptions }
+  ): Promise<void> => {
+    await raw.secure_kv_change_access_control(
+      key,
+      newAccessControl.accessControl,
+      windowOf(newAccessControl),
+      ...promptArgs(options?.prompt)
+    );
+  }
 );
 
 // --- BIP-32 / SLIP-10 derivation slot (tag 0x01) ---------------------------
@@ -140,15 +281,12 @@ const bip32_setSeed = wrapNativeAsync(
   async (
     alias: string,
     seed: Uint8Array,
-    options: AccessControlOptions = DEFAULT_AC,
-    prompt?: BiometricPromptOptions
+    options: SecureKVWriteOptions = DEFAULT_WRITE
   ): Promise<void> => {
     await raw.secure_kv_bip32_set_seed(
       alias,
       toArrayBuffer(seed),
-      options.accessControl,
-      windowOf(options),
-      ...promptArgs(prompt)
+      ...writeArgs(options)
     );
   }
 );
@@ -158,13 +296,13 @@ const bip32_fingerprint = wrapNativeAsync(
     alias: string,
     path: string | number[],
     curve: Bip32Curve,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<number> =>
     raw.secure_kv_bip32_fingerprint(
       alias,
       pathBuf(path),
       curve,
-      ...promptArgs(prompt)
+      ...readArgs(options)
     )
 );
 
@@ -174,7 +312,7 @@ const bip32_getPublicKey = wrapNativeAsync(
     path: string | number[],
     curve: Bip32Curve,
     compact: boolean = true,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_bip32_get_public(
@@ -182,7 +320,7 @@ const bip32_getPublicKey = wrapNativeAsync(
         pathBuf(path),
         curve,
         compact,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -193,7 +331,7 @@ const bip32_signEcdsa = wrapNativeAsync(
     path: string | number[],
     digest: Uint8Array,
     curve: Curve,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<EcdsaSignature> => {
     const res = new Uint8Array(
       await raw.secure_kv_bip32_sign_ecdsa(
@@ -201,7 +339,7 @@ const bip32_signEcdsa = wrapNativeAsync(
         pathBuf(path),
         toArrayBuffer(digest),
         curve,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     );
     return { signature: res.slice(1), recId: res[0] as number };
@@ -214,7 +352,7 @@ const bip32_signSchnorr = wrapNativeAsync(
     path: string | number[],
     digest: Uint8Array,
     aux?: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_bip32_sign_schnorr(
@@ -222,7 +360,7 @@ const bip32_signSchnorr = wrapNativeAsync(
         pathBuf(path),
         toArrayBuffer(digest),
         aux ? toArrayBuffer(aux) : null,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -233,7 +371,7 @@ const bip32_signSchnorrTaproot = wrapNativeAsync(
     path: string | number[],
     digest: Uint8Array,
     merkleRoot?: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_bip32_sign_schnorr_taproot(
@@ -241,7 +379,7 @@ const bip32_signSchnorrTaproot = wrapNativeAsync(
         pathBuf(path),
         toArrayBuffer(digest),
         merkleRoot ? toArrayBuffer(merkleRoot) : null,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -251,14 +389,14 @@ const bip32_signEd25519 = wrapNativeAsync(
     alias: string,
     path: string | number[],
     msg: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_bip32_sign_ed25519(
         alias,
         pathBuf(path),
         toArrayBuffer(msg),
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -269,7 +407,7 @@ const bip32_ecdh = wrapNativeAsync(
     path: string | number[],
     peerPub: Uint8Array,
     curve: Curve,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_bip32_ecdh(
@@ -277,9 +415,46 @@ const bip32_ecdh = wrapNativeAsync(
         pathBuf(path),
         toArrayBuffer(peerPub),
         curve,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
+);
+
+const bip32_exportEncryptedSeed = wrapNativeAsync(
+  async (
+    alias: string,
+    exportPassphrase: string,
+    options?: SecureKVReadOptions & { passphraseIterations?: number }
+  ): Promise<Uint8Array> => {
+    const env = await raw.secure_kv_bip32_export_seed(
+      alias,
+      exportPassphrase,
+      options?.passphrase ?? '',
+      options?.passphraseIterations ?? 0,
+      ...promptArgs(options?.prompt)
+    );
+    return new Uint8Array(env);
+  }
+);
+
+const bip32_importEncryptedSeed = wrapNativeAsync(
+  async (
+    newAlias: string,
+    envelope: Uint8Array,
+    exportPassphrase: string,
+    options: SecureKVWriteOptions = DEFAULT_WRITE
+  ): Promise<void> => {
+    await raw.secure_kv_bip32_import_seed(
+      newAlias,
+      toArrayBuffer(envelope),
+      exportPassphrase,
+      acOf(options),
+      windowOf(options),
+      ...promptArgs(options.prompt),
+      options.passphrase ?? '',
+      options.passphraseIterations ?? 0
+    );
+  }
 );
 
 // --- raw 32-byte private key slot (tag 0x02) -------------------------------
@@ -289,16 +464,13 @@ const raw_setPrivate = wrapNativeAsync(
     alias: string,
     priv: Uint8Array,
     curve: Bip32Curve,
-    options: AccessControlOptions = DEFAULT_AC,
-    prompt?: BiometricPromptOptions
+    options: SecureKVWriteOptions = DEFAULT_WRITE
   ): Promise<void> => {
     await raw.secure_kv_raw_set_private(
       alias,
       toArrayBuffer(priv),
       curve,
-      options.accessControl,
-      windowOf(options),
-      ...promptArgs(prompt)
+      ...writeArgs(options)
     );
   }
 );
@@ -307,10 +479,10 @@ const raw_getPublicKey = wrapNativeAsync(
   async (
     alias: string,
     compact: boolean = true,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
-      await raw.secure_kv_raw_get_public(alias, compact, ...promptArgs(prompt))
+      await raw.secure_kv_raw_get_public(alias, compact, ...readArgs(options))
     )
 );
 
@@ -318,13 +490,13 @@ const raw_signEcdsa = wrapNativeAsync(
   async (
     alias: string,
     digest: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<EcdsaSignature> => {
     const res = new Uint8Array(
       await raw.secure_kv_raw_sign_ecdsa(
         alias,
         toArrayBuffer(digest),
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     );
     return { signature: res.slice(1), recId: res[0] as number };
@@ -336,14 +508,14 @@ const raw_signSchnorr = wrapNativeAsync(
     alias: string,
     digest: Uint8Array,
     aux?: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_raw_sign_schnorr(
         alias,
         toArrayBuffer(digest),
         aux ? toArrayBuffer(aux) : null,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -353,14 +525,14 @@ const raw_signSchnorrTaproot = wrapNativeAsync(
     alias: string,
     digest: Uint8Array,
     merkleRoot?: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_raw_sign_schnorr_taproot(
         alias,
         toArrayBuffer(digest),
         merkleRoot ? toArrayBuffer(merkleRoot) : null,
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -369,13 +541,13 @@ const raw_signEd25519 = wrapNativeAsync(
   async (
     alias: string,
     msg: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_raw_sign_ed25519(
         alias,
         toArrayBuffer(msg),
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -384,13 +556,13 @@ const raw_ecdh = wrapNativeAsync(
   async (
     alias: string,
     peerPub: Uint8Array,
-    prompt?: BiometricPromptOptions
+    options?: SecureKVReadOptions
   ): Promise<Uint8Array> =>
     new Uint8Array(
       await raw.secure_kv_raw_ecdh(
         alias,
         toArrayBuffer(peerPub),
-        ...promptArgs(prompt)
+        ...readArgs(options)
       )
     )
 );
@@ -416,6 +588,13 @@ const raw_ecdh = wrapNativeAsync(
  * - **`secureKV.raw`** — provision a single 32-byte private key bound
  *   to a curve, sign with it directly. No derivation.
  *
+ * Items can additionally be passphrase-wrapped via the `passphrase`
+ * field on the write options bag; the same passphrase is then required
+ * on every read. The wrap layer (PBKDF2-HMAC-SHA512 + AES-256-GCM with
+ * a KCV verifier) sits *inside* the Keychain/Keystore-encrypted blob,
+ * so wrong passphrase, missing passphrase and data corruption are all
+ * distinguishable.
+ *
  * Storage is device-local: never iCloud-synced on iOS, and excluded
  * from Google Drive auto-backup on Android when the host opts in via
  * the bundled `data_extraction_rules.xml`. Wipe semantics are
@@ -437,6 +616,28 @@ export const secureKV = {
   clear,
   isHardwareBacked,
   biometricStatus,
+  /**
+   * Reads plaintext metadata for `key` without triggering a biometric
+   * prompt or AES decrypt. UI hint for "should I show a passphrase
+   * dialog?" / "is this item biometric?".
+   */
+  metadata,
+  /**
+   * Re-wraps an existing item under a new passphrase, in place. Pass
+   * `''` for `oldPassphrase` to add a wrap to a previously-unwrapped
+   * item, or `''` for `newPassphrase` to remove the wrap entirely.
+   * Inner slot bytes never cross the JSI boundary — the operation is
+   * native-only, even when changing the wrap from BLOB / SEED / RAW.
+   */
+  changePassphrase,
+  /**
+   * Switches an item's `accessControl` (and `validityWindow`) without
+   * parsing or extracting the slot. The blob bytes pass through C++
+   * verbatim between the old and new master key — useful for adding
+   * biometric protection to an existing item or changing the window
+   * on an existing biometric item.
+   */
+  changeAccessControl,
   /**
    * Drops any cached biometric authentication so the next read prompts
    * fresh, ignoring any outstanding `validityWindow`. Pass an `alias`
@@ -463,6 +664,24 @@ export const secureKV = {
     signSchnorrTaproot: bip32_signSchnorrTaproot,
     signEd25519: bip32_signEd25519,
     ecdh: bip32_ecdh,
+    /**
+     * Reads a SEED slot and returns it re-wrapped under
+     * `exportPassphrase` as raw envelope bytes (`Uint8Array`). Caller
+     * chooses how to serialise (base64, hex, QR, file). The seed itself
+     * never reaches JS — only the encrypted envelope.
+     *
+     * If the source alias is itself passphrase-wrapped, pass that
+     * passphrase via `options.passphrase` to unlock storage; otherwise
+     * leave it empty.
+     */
+    exportEncryptedSeed: bip32_exportEncryptedSeed,
+    /**
+     * Decrypts an envelope produced by `exportEncryptedSeed` and stores
+     * the SEED slot under `newAlias`. If `options.passphrase` is non-
+     * empty, the new alias is also passphrase-wrapped at storage layer
+     * with that passphrase.
+     */
+    importEncryptedSeed: bip32_importEncryptedSeed,
   },
 
   raw: {
