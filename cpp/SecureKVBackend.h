@@ -8,6 +8,21 @@
 
 namespace facebook::react::cryptolib {
 
+// Caller-supplied biometric prompt copy. Populated by the JSI thunk
+// from the JS-level `BiometricPromptOptions` and forwarded to the
+// platform backend. Empty strings mean "use platform default" — the
+// backend never echoes them verbatim, so callers can pass `{}` to keep
+// the system-default prompt UX.
+struct BiometricPromptCopy {
+  std::string title;
+  std::string subtitle;
+  std::string cancelLabel;
+
+  bool empty() const noexcept {
+    return title.empty() && subtitle.empty() && cancelLabel.empty();
+  }
+};
+
 // Per-item access-control gating. Stored alongside the item at provisioning;
 // reads inherit it. Future variants will go here without breaking call sites.
 enum class AccessControl : uint8_t {
@@ -60,15 +75,30 @@ class SecureKVBackend {
     const uint8_t* data,
     size_t len,
     AccessControl ac,
-    uint32_t validityWindowSec  // ignored when ac == None
+    uint32_t validityWindowSec,  // ignored when ac == None
+    const BiometricPromptCopy& prompt = {}
   );
-  static std::optional<std::vector<uint8_t>> get(const std::string& key);
+  static std::optional<std::vector<uint8_t>> get(
+    const std::string& key,
+    const BiometricPromptCopy& prompt = {}
+  );
   static bool has(const std::string& key);
   static void remove(const std::string& key);
   static std::vector<std::string> list();
   static void clear();
   static bool isHardwareBacked();
   static BiometricStatus biometricStatus();
+
+  // Drops any cached biometric authentication for the given alias (or
+  // all aliases when `alias` is empty). On iOS this invalidates the
+  // per-alias `LAContext` so the next read prompts fresh, ignoring any
+  // outstanding `touchIDAuthenticationAllowableReuseDuration` window.
+  // On Android this is a no-op — the validity window lives inside
+  // AndroidKeystore and cannot be cleared from userland; callers must
+  // wait for it to expire or use `validityWindow: 0` for per-call
+  // prompts. Documented as no-op in the JS-level JSDoc so cross-
+  // platform code can call it unconditionally.
+  static void invalidateSession(const std::string& alias);
 };
 
 }  // namespace facebook::react::cryptolib

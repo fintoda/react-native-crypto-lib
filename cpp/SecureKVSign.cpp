@@ -10,23 +10,27 @@
 //
 // Every operation pulls the encrypted blob from the platform backend
 // (Keychain / AndroidKeystore via cpp/SecureKVBackend.h), parses the
-// slot, runs the crypto in-place on the C++ stack, and memzero's both
-// the slot bytes and any derived material before returning. The private
-// key never crosses the JSI boundary.
+// slot, runs the crypto, and memzero's both the slot bytes and any
+// derived material before returning. The private key never crosses the
+// JSI boundary.
+//
+// All thunks dispatch the backend call (and the crypto that follows it)
+// to a worker thread via makePromiseAsync — the platform layer can
+// block on a biometric prompt for tens of seconds, and we don't want
+// the JS thread frozen while that happens. The Phase 1 validation
+// (charset, length, curve) still runs synchronously on the JS thread,
+// wrapped by safeAsyncThunk so jsi::JSError throws surface as Promise
+// rejections rather than synchronous JS-side throws.
 //
 // Path encoding follows cpp/Bip32.cpp: a packed ArrayBuffer of 4-byte
 // big-endian uint32 indices (4 * N bytes for an N-step path). The TS
 // wrapper layer converts the conventional "m/44'/0'/0'/0/0" string form
 // into this packed buffer.
-//
-// The public API of this module is async (Promise-returning); each
-// public `invoke_*` thunk wraps its sync body in `makePromise` so call
-// sites can `await` and so a future biometric-prompt path can layer in
-// without breaking the API surface.
 
 #include "Common.h"
 #include "SchnorrInternal.h"
 #include "SecureKVBackend.h"
+#include "SecureKVCommon.h"
 #include "SecureKVSlot.h"
 
 #include <cstring>
@@ -46,67 +50,6 @@ extern "C" {
 
 namespace facebook::react::cryptolib {
 namespace {
-
-constexpr size_t kMaxKeyLen = 128;
-
-bool isValidKeyChar(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-}
-
-void requireValidAlias(
-  jsi::Runtime& rt, const char* op, const std::string& key
-) {
-  if (key.empty() || key.size() > kMaxKeyLen) {
-    throw jsi::JSError(rt, std::string(op) + ": key length out of range");
-  }
-  for (char c : key) {
-    if (!isValidKeyChar(c)) {
-      throw jsi::JSError(
-        rt, std::string(op) + ": key contains invalid character");
-    }
-  }
-}
-
-[[noreturn]] void rethrowAsJsi(
-  jsi::Runtime& rt, const char* op, const std::exception& e
-) {
-  throw jsi::JSError(rt, std::string(op) + ": " + e.what());
-}
-
-// Same parsing rule as cpp/SecureKV.cpp's parseAccessControl. Duplicated
-// rather than shared via Common.h because both files would otherwise need
-// to include SecureKVBackend.h transitively through it.
-AccessControl parseAccessControl(
-  jsi::Runtime& rt, const char* op, const std::string& s
-) {
-  if (s == "none") return AccessControl::None;
-  if (s == "biometric") return AccessControl::Biometric;
-  throw jsi::JSError(
-    rt, std::string(op) + ": unknown accessControl '" + s + "'");
-}
-
-uint32_t parseValidityWindow(
-  jsi::Runtime& rt,
-  const char* op,
-  const jsi::Value* args,
-  size_t count,
-  size_t index
-) {
-  if (count <= index) return 0;
-  if (args[index].isUndefined() || args[index].isNull()) return 0;
-  if (!args[index].isNumber()) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": validityWindow must be a number");
-  }
-  double v = args[index].asNumber();
-  if (v < 0 || v > static_cast<double>(UINT32_MAX) ||
-      v != static_cast<double>(static_cast<uint32_t>(v))) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": validityWindow must be a non-negative integer");
-  }
-  return static_cast<uint32_t>(v);
-}
 
 uint8_t curveTagFromString(const std::string& s) {
   if (s == "secp256k1") return kCurveTagSecp256k1;
@@ -140,83 +83,57 @@ struct ScrubbedSlot {
   ~ScrubbedSlot() { if (!bytes.empty()) memzero(bytes.data(), bytes.size()); }
 };
 
+// Used inside bgWork (worker thread) — throws std::runtime_error rather
+// than jsi::JSError because no jsi::Runtime is available here. The
+// caught message is propagated back to JS by makePromiseAsync.
 ScrubbedSlot loadSlotOrThrow(
-  jsi::Runtime& rt, const char* op, const std::string& alias
+  const std::string& alias,
+  const BiometricPromptCopy& prompt = {}
 ) {
-  std::optional<std::vector<uint8_t>> result;
-  try {
-    result = SecureKVBackend::get(alias);
-  } catch (const std::exception& e) {
-    rethrowAsJsi(rt, op, e);
+  auto raw = SecureKVBackend::get(alias, prompt);
+  if (!raw.has_value()) {
+    throw std::runtime_error("key not found");
   }
-  if (!result.has_value()) {
-    throw jsi::JSError(rt, std::string(op) + ": key not found");
-  }
-  return ScrubbedSlot{std::move(*result)};
+  return ScrubbedSlot{std::move(*raw)};
 }
 
-// Parses the slot and throws on a zero-length / malformed blob. Mirrors
-// the defensive pattern in cpp/SecureKV.cpp's invoke_get; without it,
-// `SlotView` stays uninitialised and later `slot.kind` / `slot.payload`
-// reads operate on indeterminate memory.
-void parseSlotOrThrow(
-  jsi::Runtime& rt,
-  const char* op,
-  const ScrubbedSlot& blob,
-  SlotView& out
-) {
+void parseSlotOrThrow(const ScrubbedSlot& blob, SlotView& out) {
   if (!parseSlot(blob.bytes.data(), blob.bytes.size(), out)) {
-    throw jsi::JSError(rt, std::string(op) + ": slot is empty or malformed");
+    throw std::runtime_error("slot is empty or malformed");
   }
 }
 
-void requireSlotKind(
-  jsi::Runtime& rt,
-  const char* op,
-  const SlotView& slot,
-  SlotKind expected
-) {
+void requireSlotKind(const SlotView& slot, SlotKind expected) {
   if (slot.kind != expected) {
-    throw jsi::JSError(
-      rt,
-      std::string(op) + ": slot is " + slotKindName(slot.kind) +
+    throw std::runtime_error(
+      std::string("slot is ") + slotKindName(slot.kind) +
         ", expected " + slotKindName(expected));
   }
 }
 
-void requirePayloadLen(
-  jsi::Runtime& rt,
-  const char* op,
-  const SlotView& slot,
-  size_t expected
-) {
+void requirePayloadLen(const SlotView& slot, size_t expected) {
   if (slot.payloadLen != expected) {
-    throw jsi::JSError(
-      rt,
-      std::string(op) + ": slot payload corrupt (expected " +
-        std::to_string(expected) + " bytes, got " +
-        std::to_string(slot.payloadLen) + ")");
+    throw std::runtime_error(
+      "slot payload corrupt (expected " + std::to_string(expected) +
+        " bytes, got " + std::to_string(slot.payloadLen) + ")");
   }
 }
 
-void requireSeedPayloadLen(
-  jsi::Runtime& rt, const char* op, const SlotView& slot
-) {
+void requireSeedPayloadLen(const SlotView& slot) {
   if (slot.payloadLen < kMinSeedPayloadLen ||
       slot.payloadLen > kMaxSeedPayloadLen) {
-    throw jsi::JSError(
-      rt,
-      std::string(op) + ": seed slot has out-of-range length " +
-        std::to_string(slot.payloadLen));
+    throw std::runtime_error(
+      "seed slot has out-of-range length " + std::to_string(slot.payloadLen));
   }
 }
 
 // --- Path parsing ----------------------------------------------------------
 
 // Validates the path ArrayBuffer (multiple of 4 bytes, ≤ ~32 levels) and
-// returns step count + raw pointer to the BE-encoded indices.
+// copies it into a vector so the bytes survive past the JS-thread thunk
+// frame (we hand them to a worker thread).
 struct PathArg {
-  const uint8_t* data;
+  std::vector<uint8_t> data;
   size_t steps;
 };
 
@@ -234,7 +151,10 @@ PathArg readPath(
     throw jsi::JSError(
       rt, std::string(op) + ": path too deep (max 32 levels)");
   }
-  return {len == 0 ? nullptr : path.data(rt), len / 4};
+  PathArg out;
+  out.steps = len / 4;
+  out.data.assign(path.data(rt), path.data(rt) + len);
+  return out;
 }
 
 uint32_t readBeU32(const uint8_t* src) {
@@ -246,19 +166,15 @@ uint32_t readBeU32(const uint8_t* src) {
 
 // --- Derivation ------------------------------------------------------------
 
-// Holds a derived child's material. Caller must memzero on use.
 struct DerivedKey {
   uint8_t priv[32];
   uint8_t pub[33];   // compressed (or 0x00||ed25519-pub for SLIP-10 ed25519)
   uint32_t fingerprint;
 };
 
-// Derives a child key from the seed at the given path on the named curve.
-// Throws jsi::JSError on failure. memzero's all internal HDNode state
-// before returning.
+// Throws std::runtime_error on failure (worker-thread-safe — no jsi).
+// memzero's all internal HDNode state before returning.
 void deriveFromSeed(
-  jsi::Runtime& rt,
-  const char* op,
   const uint8_t* seed,
   size_t seedLen,
   uint8_t curveTag,
@@ -268,19 +184,19 @@ void deriveFromSeed(
 ) {
   const char* curveName = curveNameFromTag(curveTag);
   if (!curveName) {
-    throw jsi::JSError(rt, std::string(op) + ": unknown curve");
+    throw std::runtime_error("unknown curve");
   }
   HDNode node;
   std::memset(&node, 0, sizeof(node));
   if (hdnode_from_seed(seed, static_cast<int>(seedLen), curveName, &node) != 1) {
     memzero(&node, sizeof(node));
-    throw jsi::JSError(rt, std::string(op) + ": seed rejected");
+    throw std::runtime_error("seed rejected");
   }
   for (size_t i = 0; i < pathSteps; ++i) {
     uint32_t index = readBeU32(pathBytes + i * 4);
     if (hdnode_private_ckd(&node, index) != 1) {
       memzero(&node, sizeof(node));
-      throw jsi::JSError(rt, std::string(op) + ": derivation failed");
+      throw std::runtime_error("derivation failed");
     }
   }
   hdnode_fill_public_key(&node);
@@ -290,340 +206,8 @@ void deriveFromSeed(
   memzero(&node, sizeof(node));
 }
 
-// --- Sync bodies (called from inside makePromise lambdas) ------------------
-
-jsi::Value bip32_set_seed_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_set_seed";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto seed = requireArrayBufferAt(rt, op, "seed", args, count, 1);
-  size_t len = seed.size(rt);
-  if (len < kMinSeedPayloadLen || len > kMaxSeedPayloadLen) {
-    throw jsi::JSError(
-      rt,
-      std::string(op) + ": seed must be 16..64 bytes (BIP-32 spec)");
-  }
-  std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 2);
-  AccessControl ac = parseAccessControl(rt, op, acStr);
-  uint32_t window = parseValidityWindow(rt, op, args, count, 3);
-  auto wrapped = wrapSeedSlot(seed.data(rt), len);
-  try {
-    SecureKVBackend::set(alias, wrapped.data(), wrapped.size(), ac, window);
-  } catch (const std::exception& e) {
-    memzero(wrapped.data(), wrapped.size());
-    rethrowAsJsi(rt, op, e);
-  }
-  memzero(wrapped.data(), wrapped.size());
-  return jsi::Value::undefined();
-}
-
-jsi::Value bip32_fingerprint_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_fingerprint";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
-  uint8_t curveTag = curveTagFromString(curveStr);
-  if (curveTag == 0xff) {
-    throw jsi::JSError(rt, std::string(op) + ": unknown curve");
-  }
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, curveTag, p.data, p.steps, k);
-  uint32_t fp = k.fingerprint;
-  memzero(&k, sizeof(k));
-  return jsi::Value(static_cast<double>(fp));
-}
-
-jsi::Value bip32_get_public_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_get_public";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
-  bool compact = requireBoolAt(rt, op, "compact", args, count, 3);
-  uint8_t curveTag = curveTagFromString(curveStr);
-  if (curveTag == 0xff) {
-    throw jsi::JSError(rt, std::string(op) + ": unknown curve");
-  }
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, curveTag, p.data, p.steps, k);
-
-  std::vector<uint8_t> out;
-  if (curveTag == kCurveTagEd25519) {
-    out.assign(k.pub + 1, k.pub + 33);
-  } else if (compact) {
-    out.assign(k.pub, k.pub + 33);
-  } else {
-    const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
-    curve_point point = {};
-    if (ecdsa_read_pubkey(curve, k.pub, &point) == 0) {
-      memzero(&point, sizeof(point));
-      memzero(&k, sizeof(k));
-      throw jsi::JSError(rt, std::string(op) + ": derived pubkey invalid");
-    }
-    out.resize(65);
-    out[0] = 0x04;
-    bn_write_be(&point.x, out.data() + 1);
-    bn_write_be(&point.y, out.data() + 33);
-    memzero(&point, sizeof(point));
-  }
-
-  memzero(&k, sizeof(k));
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value bip32_sign_ecdsa_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_sign_ecdsa";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 2);
-  std::string curveStr = requireStringAt(rt, op, "curve", args, count, 3);
-  if (digest.size(rt) != 32) {
-    throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
-  }
-  uint8_t curveTag = curveTagFromString(curveStr);
-  const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
-  if (!curve) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": curve must be secp256k1 or nist256p1");
-  }
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, curveTag, p.data, p.steps, k);
-
-  std::vector<uint8_t> out(65);
-  uint8_t pby = 0;
-  int err = ecdsa_sign_digest(
-    curve, k.priv, digest.data(rt), out.data() + 1, &pby, nullptr);
-  memzero(&k, sizeof(k));
-  if (err != 0) {
-    memzero(out.data(), out.size());
-    throw jsi::JSError(rt, std::string(op) + ": signing failed");
-  }
-  out[0] = pby;
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value bip32_sign_schnorr_impl(
-  jsi::Runtime& rt,
-  const jsi::Value* args,
-  size_t count,
-  const char* op,
-  bool taproot
-) {
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 2);
-  if (digest.size(rt) != 32) {
-    throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
-  }
-  // Last optional arg: aux (for plain Schnorr) or merkleRoot (for Taproot).
-  // null/undefined → empty.
-  const uint8_t* extraPtr = nullptr;
-  size_t extraLen = 0;
-  if (count > 3 && !args[3].isUndefined() && !args[3].isNull()) {
-    auto extra = requireArrayBufferAt(
-      rt, op, taproot ? "merkleRoot" : "aux", args, count, 3);
-    extraPtr = extra.data(rt);
-    extraLen = extra.size(rt);
-    if (!taproot && extraLen != 32) {
-      throw jsi::JSError(rt, std::string(op) + ": aux must be 32 bytes");
-    }
-  }
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, kCurveTagSecp256k1,
-    p.data, p.steps, k);
-
-  uint8_t signingPriv[32];
-  if (taproot) {
-    if (!schnorr_internal::tweakPrivate(
-          k.priv, extraPtr, extraLen, signingPriv)) {
-      memzero(&k, sizeof(k));
-      memzero(signingPriv, sizeof(signingPriv));
-      throw jsi::JSError(rt, std::string(op) + ": tap-tweak failed");
-    }
-  } else {
-    std::memcpy(signingPriv, k.priv, 32);
-  }
-  memzero(&k, sizeof(k));
-
-  std::vector<uint8_t> out(64);
-  bool ok = schnorr_internal::sign(
-    signingPriv, digest.data(rt),
-    taproot ? nullptr : extraPtr,
-    out.data());
-  memzero(signingPriv, sizeof(signingPriv));
-  if (!ok) {
-    memzero(out.data(), out.size());
-    throw jsi::JSError(rt, std::string(op) + ": signing failed");
-  }
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value bip32_sign_ed25519_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_sign_ed25519";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 2);
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, kCurveTagEd25519,
-    p.data, p.steps, k);
-
-  std::vector<uint8_t> out(64);
-  ed25519_sign(safeData(rt, msg), msg.size(rt), k.priv, out.data());
-  memzero(&k, sizeof(k));
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value bip32_ecdh_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_bip32_ecdh";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
-  auto pub = requireArrayBufferAt(rt, op, "peerPub", args, count, 2);
-  std::string curveStr = requireStringAt(rt, op, "curve", args, count, 3);
-  size_t publen = pub.size(rt);
-  if (publen != 33 && publen != 65) {
-    throw jsi::JSError(rt, std::string(op) + ": peerPub must be 33 or 65 bytes");
-  }
-  uint8_t curveTag = curveTagFromString(curveStr);
-  const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
-  if (!curve) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": curve must be secp256k1 or nist256p1");
-  }
-  PathArg p = readPath(rt, op, path);
-
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
-  SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::Bip32Seed);
-  requireSeedPayloadLen(rt, op, slot);
-
-  DerivedKey k;
-  std::memset(&k, 0, sizeof(k));
-  deriveFromSeed(
-    rt, op, slot.payload, slot.payloadLen, curveTag, p.data, p.steps, k);
-
-  uint8_t full[65];
-  int err = ecdh_multiply(curve, k.priv, pub.data(rt), full);
-  memzero(&k, sizeof(k));
-  if (err != 0) {
-    memzero(full, sizeof(full));
-    throw jsi::JSError(rt, std::string(op) + ": shared secret computation failed");
-  }
-  std::vector<uint8_t> out(33);
-  out[0] = 0x02 | (full[64] & 0x01);
-  std::memcpy(out.data() + 1, full + 1, 32);
-  memzero(full, sizeof(full));
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value raw_set_private_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_raw_set_private";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto priv = requireArrayBufferAt(rt, op, "priv", args, count, 1);
-  std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
-  if (priv.size(rt) != 32) {
-    throw jsi::JSError(rt, std::string(op) + ": priv must be 32 bytes");
-  }
-  uint8_t curveTag = curveTagFromString(curveStr);
-  if (curveTag == 0xff) {
-    throw jsi::JSError(rt, std::string(op) + ": unknown curve");
-  }
-  // For ECDSA curves, validate the scalar lies in [1, n-1] before storing
-  // — otherwise sign-time would surface a confusing "invalid private key".
-  // Ed25519 accepts any 32-byte seed (clamped internally), so skip there.
-  if (curveTag == kCurveTagSecp256k1 || curveTag == kCurveTagNist256p1) {
-    const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
-    uint8_t probe[33];
-    if (ecdsa_get_public_key33(curve, priv.data(rt), probe) != 0) {
-      memzero(probe, sizeof(probe));
-      throw jsi::JSError(
-        rt, std::string(op) + ": private key out of range for curve");
-    }
-    memzero(probe, sizeof(probe));
-  }
-  std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 3);
-  AccessControl ac = parseAccessControl(rt, op, acStr);
-  uint32_t window = parseValidityWindow(rt, op, args, count, 4);
-  auto wrapped = wrapRawSlot(curveTag, priv.data(rt));
-  try {
-    SecureKVBackend::set(alias, wrapped.data(), wrapped.size(), ac, window);
-  } catch (const std::exception& e) {
-    memzero(wrapped.data(), wrapped.size());
-    rethrowAsJsi(rt, op, e);
-  }
-  memzero(wrapped.data(), wrapped.size());
-  return jsi::Value::undefined();
-}
+// Vector return alias used across most thunks.
+using ByteVec = std::vector<uint8_t>;
 
 // Helper: parse RAW slot, copy into RawKey, optionally enforce a curve.
 struct RawKey {
@@ -632,352 +216,775 @@ struct RawKey {
 };
 
 void loadRawKey(
-  jsi::Runtime& rt,
-  const char* op,
   const std::string& alias,
   RawKey& out,
-  int requiredCurveTag /* -1 = any */
+  int requiredCurveTag, /* -1 = any */
+  const BiometricPromptCopy& prompt = {}
 ) {
-  ScrubbedSlot blob = loadSlotOrThrow(rt, op, alias);
+  ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
   SlotView slot;
-  parseSlotOrThrow(rt, op, blob, slot);
-  requireSlotKind(rt, op, slot, SlotKind::RawPrivate);
-  requirePayloadLen(rt, op, slot, kRawPayloadLen);
+  parseSlotOrThrow(blob, slot);
+  requireSlotKind(slot, SlotKind::RawPrivate);
+  requirePayloadLen(slot, kRawPayloadLen);
 
   out.curveTag = slot.payload[0];
   std::memcpy(out.priv, slot.payload + 1, 32);
 
   if (requiredCurveTag >= 0 &&
       out.curveTag != static_cast<uint8_t>(requiredCurveTag)) {
+    auto have = curveNameFromTag(out.curveTag);
+    auto want = curveNameFromTag(static_cast<uint8_t>(requiredCurveTag));
     memzero(&out, sizeof(out));
-    throw jsi::JSError(
-      rt,
-      std::string(op) + ": slot curve is " +
-        (curveNameFromTag(out.curveTag) ? curveNameFromTag(out.curveTag) : "unknown") +
+    throw std::runtime_error(
+      std::string("slot curve is ") +
+        (have ? have : "unknown") +
         ", expected " +
-        (curveNameFromTag(static_cast<uint8_t>(requiredCurveTag)) ?
-           curveNameFromTag(static_cast<uint8_t>(requiredCurveTag)) : "unknown"));
+        (want ? want : "unknown"));
   }
 }
 
-jsi::Value raw_get_public_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_raw_get_public";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  bool compact = requireBoolAt(rt, op, "compact", args, count, 1);
-
-  RawKey k;
-  loadRawKey(rt, op, alias, k, -1);
-
-  std::vector<uint8_t> out;
-  if (k.curveTag == kCurveTagEd25519) {
-    out.resize(32);
-    ed25519_publickey(k.priv, out.data());
-  } else {
-    const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
-    out.resize(compact ? 33 : 65);
-    int err = compact
-      ? ecdsa_get_public_key33(curve, k.priv, out.data())
-      : ecdsa_get_public_key65(curve, k.priv, out.data());
-    if (err != 0) {
-      memzero(&k, sizeof(k));
-      throw jsi::JSError(rt, std::string(op) + ": invalid private key");
-    }
-  }
-  memzero(&k, sizeof(k));
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value raw_sign_ecdsa_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_raw_sign_ecdsa";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 1);
-  if (digest.size(rt) != 32) {
-    throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
-  }
-
-  RawKey k;
-  loadRawKey(rt, op, alias, k, -1);
-  if (k.curveTag != kCurveTagSecp256k1 &&
-      k.curveTag != kCurveTagNist256p1) {
-    memzero(&k, sizeof(k));
-    throw jsi::JSError(
-      rt, std::string(op) + ": ECDSA requires secp256k1 or nist256p1 slot");
-  }
-  const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
-
-  std::vector<uint8_t> out(65);
-  uint8_t pby = 0;
-  int err = ecdsa_sign_digest(
-    curve, k.priv, digest.data(rt), out.data() + 1, &pby, nullptr);
-  memzero(&k, sizeof(k));
-  if (err != 0) {
-    memzero(out.data(), out.size());
-    throw jsi::JSError(rt, std::string(op) + ": signing failed");
-  }
-  out[0] = pby;
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value raw_sign_schnorr_impl(
-  jsi::Runtime& rt,
-  const jsi::Value* args,
-  size_t count,
-  const char* op,
-  bool taproot
-) {
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 1);
-  if (digest.size(rt) != 32) {
-    throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
-  }
-  const uint8_t* extraPtr = nullptr;
-  size_t extraLen = 0;
-  if (count > 2 && !args[2].isUndefined() && !args[2].isNull()) {
-    auto extra = requireArrayBufferAt(
-      rt, op, taproot ? "merkleRoot" : "aux", args, count, 2);
-    extraPtr = extra.data(rt);
-    extraLen = extra.size(rt);
-    if (!taproot && extraLen != 32) {
-      throw jsi::JSError(rt, std::string(op) + ": aux must be 32 bytes");
-    }
-  }
-
-  RawKey k;
-  loadRawKey(rt, op, alias, k, kCurveTagSecp256k1);
-
-  uint8_t signingPriv[32];
-  if (taproot) {
-    if (!schnorr_internal::tweakPrivate(
-          k.priv, extraPtr, extraLen, signingPriv)) {
-      memzero(&k, sizeof(k));
-      memzero(signingPriv, sizeof(signingPriv));
-      throw jsi::JSError(rt, std::string(op) + ": tap-tweak failed");
-    }
-  } else {
-    std::memcpy(signingPriv, k.priv, 32);
-  }
-  memzero(&k, sizeof(k));
-
-  std::vector<uint8_t> out(64);
-  bool ok = schnorr_internal::sign(
-    signingPriv, digest.data(rt),
-    taproot ? nullptr : extraPtr,
-    out.data());
-  memzero(signingPriv, sizeof(signingPriv));
-  if (!ok) {
-    memzero(out.data(), out.size());
-    throw jsi::JSError(rt, std::string(op) + ": signing failed");
-  }
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value raw_sign_ed25519_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_raw_sign_ed25519";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 1);
-
-  RawKey k;
-  loadRawKey(rt, op, alias, k, kCurveTagEd25519);
-
-  std::vector<uint8_t> out(64);
-  ed25519_sign(safeData(rt, msg), msg.size(rt), k.priv, out.data());
-  memzero(&k, sizeof(k));
-  return wrapDigest(rt, std::move(out));
-}
-
-jsi::Value raw_ecdh_sync(
-  jsi::Runtime& rt, const jsi::Value* args, size_t count
-) {
-  const char* op = "secure_kv_raw_ecdh";
-  std::string alias = requireStringAt(rt, op, "key", args, count, 0);
-  requireValidAlias(rt, op, alias);
-  auto pub = requireArrayBufferAt(rt, op, "peerPub", args, count, 1);
-  size_t publen = pub.size(rt);
-  if (publen != 33 && publen != 65) {
-    throw jsi::JSError(rt, std::string(op) + ": peerPub must be 33 or 65 bytes");
-  }
-
-  RawKey k;
-  loadRawKey(rt, op, alias, k, -1);
-  if (k.curveTag != kCurveTagSecp256k1 &&
-      k.curveTag != kCurveTagNist256p1) {
-    memzero(&k, sizeof(k));
-    throw jsi::JSError(
-      rt, std::string(op) + ": ECDH requires secp256k1 or nist256p1 slot");
-  }
-  const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
-
-  uint8_t full[65];
-  int err = ecdh_multiply(curve, k.priv, pub.data(rt), full);
-  memzero(&k, sizeof(k));
-  if (err != 0) {
-    memzero(full, sizeof(full));
-    throw jsi::JSError(rt, std::string(op) + ": shared secret computation failed");
-  }
-  std::vector<uint8_t> out(33);
-  out[0] = 0x02 | (full[64] & 0x01);
-  std::memcpy(out.data() + 1, full + 1, 32);
-  memzero(full, sizeof(full));
-  return wrapDigest(rt, std::move(out));
-}
-
-// --- Promise-wrapped public thunks -----------------------------------------
+// --- BIP-32 / SEED slot thunks ---------------------------------------------
 
 jsi::Value invoke_bip32_set_seed(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_set_seed_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_set_seed";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto seed = requireArrayBufferAt(rt, op, "seed", args, count, 1);
+    size_t len = seed.size(rt);
+    if (len < kMinSeedPayloadLen || len > kMaxSeedPayloadLen) {
+      throw jsi::JSError(
+        rt, std::string(op) + ": seed must be 16..64 bytes (BIP-32 spec)");
+    }
+    std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 2);
+    AccessControl ac = parseAccessControl(rt, op, acStr);
+    uint32_t window = parseValidityWindow(rt, op, args, count, 3);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    std::vector<uint8_t> wrapped = wrapSeedSlot(seed.data(rt), len);
+
+    return makePromiseAsync<bool>(
+      rt, op,
+      [alias = std::move(alias), wrapped = std::move(wrapped), ac, window,
+       prompt = std::move(prompt)]() mutable -> bool {
+        try {
+          SecureKVBackend::set(
+            alias, wrapped.data(), wrapped.size(), ac, window, prompt);
+        } catch (...) {
+          memzero(wrapped.data(), wrapped.size());
+          throw;
+        }
+        memzero(wrapped.data(), wrapped.size());
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value { return jsi::Value::undefined(); }
+    );
   });
 }
 
 jsi::Value invoke_bip32_fingerprint(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_fingerprint_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_fingerprint";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
+    uint8_t curveTag = curveTagFromString(curveStr);
+    if (curveTag == 0xff) {
+      throw jsi::JSError(rt, std::string(op) + ": unknown curve");
+    }
+    PathArg p = readPath(rt, op, path);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+
+    return makePromiseAsync<uint32_t>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p), curveTag,
+       prompt = std::move(prompt)]() -> uint32_t {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, curveTag,
+          p.data.data(), p.steps, k);
+        uint32_t fp = k.fingerprint;
+        memzero(&k, sizeof(k));
+        return fp;
+      },
+      [](jsi::Runtime&, uint32_t&& fp) -> jsi::Value {
+        return jsi::Value(static_cast<double>(fp));
+      }
+    );
   });
 }
 
 jsi::Value invoke_bip32_get_public(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_get_public_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_get_public";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
+    bool compact = requireBoolAt(rt, op, "compact", args, count, 3);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    uint8_t curveTag = curveTagFromString(curveStr);
+    if (curveTag == 0xff) {
+      throw jsi::JSError(rt, std::string(op) + ": unknown curve");
+    }
+    PathArg p = readPath(rt, op, path);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p), curveTag, compact,
+       prompt = std::move(prompt)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, curveTag,
+          p.data.data(), p.steps, k);
+
+        ByteVec out;
+        if (curveTag == kCurveTagEd25519) {
+          out.assign(k.pub + 1, k.pub + 33);
+        } else if (compact) {
+          out.assign(k.pub, k.pub + 33);
+        } else {
+          const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
+          curve_point point = {};
+          if (ecdsa_read_pubkey(curve, k.pub, &point) == 0) {
+            memzero(&point, sizeof(point));
+            memzero(&k, sizeof(k));
+            throw std::runtime_error("derived pubkey invalid");
+          }
+          out.resize(65);
+          out[0] = 0x04;
+          bn_write_be(&point.x, out.data() + 1);
+          bn_write_be(&point.y, out.data() + 33);
+          memzero(&point, sizeof(point));
+        }
+        memzero(&k, sizeof(k));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_bip32_sign_ecdsa(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_sign_ecdsa_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_sign_ecdsa";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 2);
+    std::string curveStr = requireStringAt(rt, op, "curve", args, count, 3);
+    if (digest.size(rt) != 32) {
+      throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
+    }
+    uint8_t curveTag = curveTagFromString(curveStr);
+    const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
+    if (!curve) {
+      throw jsi::JSError(
+        rt, std::string(op) + ": curve must be secp256k1 or nist256p1");
+    }
+    PathArg p = readPath(rt, op, path);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p),
+       digestBytes = std::move(digestBytes),
+       curveTag, curve, prompt = std::move(prompt)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, curveTag,
+          p.data.data(), p.steps, k);
+
+        ByteVec out(65);
+        uint8_t pby = 0;
+        int err = ecdsa_sign_digest(
+          curve, k.priv, digestBytes.data(), out.data() + 1, &pby, nullptr);
+        memzero(&k, sizeof(k));
+        if (err != 0) {
+          memzero(out.data(), out.size());
+          throw std::runtime_error("signing failed");
+        }
+        out[0] = pby;
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
+  });
+}
+
+// Body shared by plain Schnorr and Schnorr-Taproot for SEED slots.
+jsi::Value invoke_bip32_sign_schnorr_impl(
+  jsi::Runtime& rt,
+  const jsi::Value* args,
+  size_t count,
+  const char* op,
+  bool taproot
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 2);
+    if (digest.size(rt) != 32) {
+      throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
+    }
+    // Optional aux/merkleRoot at index 3.
+    ByteVec extraBytes;
+    bool hasExtra = false;
+    if (count > 3 && !args[3].isUndefined() && !args[3].isNull()) {
+      auto extra = requireArrayBufferAt(
+        rt, op, taproot ? "merkleRoot" : "aux", args, count, 3);
+      size_t elen = extra.size(rt);
+      if (!taproot && elen != 32) {
+        throw jsi::JSError(rt, std::string(op) + ": aux must be 32 bytes");
+      }
+      extraBytes.assign(extra.data(rt), extra.data(rt) + elen);
+      hasExtra = true;
+    }
+    PathArg p = readPath(rt, op, path);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p),
+       digestBytes = std::move(digestBytes),
+       extraBytes = std::move(extraBytes), hasExtra, taproot,
+       prompt = std::move(prompt)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, kCurveTagSecp256k1,
+          p.data.data(), p.steps, k);
+
+        uint8_t signingPriv[32];
+        const uint8_t* extraPtr = hasExtra ? extraBytes.data() : nullptr;
+        size_t extraLen = hasExtra ? extraBytes.size() : 0;
+        if (taproot) {
+          if (!schnorr_internal::tweakPrivate(
+                k.priv, extraPtr, extraLen, signingPriv)) {
+            memzero(&k, sizeof(k));
+            memzero(signingPriv, sizeof(signingPriv));
+            throw std::runtime_error("tap-tweak failed");
+          }
+        } else {
+          std::memcpy(signingPriv, k.priv, 32);
+        }
+        memzero(&k, sizeof(k));
+
+        ByteVec out(64);
+        bool ok = schnorr_internal::sign(
+          signingPriv, digestBytes.data(),
+          taproot ? nullptr : extraPtr,
+          out.data());
+        memzero(signingPriv, sizeof(signingPriv));
+        if (!ok) {
+          memzero(out.data(), out.size());
+          throw std::runtime_error("signing failed");
+        }
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_bip32_sign_schnorr(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_sign_schnorr_impl(
-      rt, args, count, "secure_kv_bip32_sign_schnorr", /*taproot*/ false);
-  });
+  return invoke_bip32_sign_schnorr_impl(
+    rt, args, count, "secure_kv_bip32_sign_schnorr", /*taproot*/ false);
 }
 
 jsi::Value invoke_bip32_sign_schnorr_taproot(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_sign_schnorr_impl(
-      rt, args, count, "secure_kv_bip32_sign_schnorr_taproot", /*taproot*/ true);
-  });
+  return invoke_bip32_sign_schnorr_impl(
+    rt, args, count, "secure_kv_bip32_sign_schnorr_taproot", /*taproot*/ true);
 }
 
 jsi::Value invoke_bip32_sign_ed25519(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_sign_ed25519_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_sign_ed25519";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 2);
+    PathArg p = readPath(rt, op, path);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+    ByteVec msgBytes;
+    msgBytes.assign(safeData(rt, msg), safeData(rt, msg) + msg.size(rt));
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p),
+       msgBytes = std::move(msgBytes),
+       prompt = std::move(prompt)]() -> ByteVec {
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, kCurveTagEd25519,
+          p.data.data(), p.steps, k);
+
+        ByteVec out(64);
+        // ed25519_sign requires non-NULL msg pointer even at len=0.
+        const uint8_t kEmpty = 0;
+        const uint8_t* mp = msgBytes.empty() ? &kEmpty : msgBytes.data();
+        ed25519_sign(mp, msgBytes.size(), k.priv, out.data());
+        memzero(&k, sizeof(k));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_bip32_ecdh(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return bip32_ecdh_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_bip32_ecdh";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto path = requireArrayBufferAt(rt, op, "path", args, count, 1);
+    auto pub = requireArrayBufferAt(rt, op, "peerPub", args, count, 2);
+    std::string curveStr = requireStringAt(rt, op, "curve", args, count, 3);
+    size_t publen = pub.size(rt);
+    if (publen != 33 && publen != 65) {
+      throw jsi::JSError(rt, std::string(op) + ": peerPub must be 33 or 65 bytes");
+    }
+    uint8_t curveTag = curveTagFromString(curveStr);
+    const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
+    if (!curve) {
+      throw jsi::JSError(
+        rt, std::string(op) + ": curve must be secp256k1 or nist256p1");
+    }
+    PathArg p = readPath(rt, op, path);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 4);
+    ByteVec pubBytes(pub.data(rt), pub.data(rt) + publen);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), p = std::move(p), pubBytes = std::move(pubBytes),
+       curveTag, curve, prompt = std::move(prompt)]() -> ByteVec {
+        (void)curveTag;
+        ScrubbedSlot blob = loadSlotOrThrow(alias, prompt);
+        SlotView slot;
+        parseSlotOrThrow(blob, slot);
+        requireSlotKind(slot, SlotKind::Bip32Seed);
+        requireSeedPayloadLen(slot);
+
+        DerivedKey k;
+        std::memset(&k, 0, sizeof(k));
+        deriveFromSeed(
+          slot.payload, slot.payloadLen, curveTag,
+          p.data.data(), p.steps, k);
+
+        uint8_t full[65];
+        int err = ecdh_multiply(curve, k.priv, pubBytes.data(), full);
+        memzero(&k, sizeof(k));
+        if (err != 0) {
+          memzero(full, sizeof(full));
+          throw std::runtime_error("shared secret computation failed");
+        }
+        ByteVec out(33);
+        out[0] = 0x02 | (full[64] & 0x01);
+        std::memcpy(out.data() + 1, full + 1, 32);
+        memzero(full, sizeof(full));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
+
+// --- RAW slot thunks --------------------------------------------------------
 
 jsi::Value invoke_raw_set_private(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_set_private_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_raw_set_private";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto priv = requireArrayBufferAt(rt, op, "priv", args, count, 1);
+    std::string curveStr = requireStringAt(rt, op, "curve", args, count, 2);
+    if (priv.size(rt) != 32) {
+      throw jsi::JSError(rt, std::string(op) + ": priv must be 32 bytes");
+    }
+    uint8_t curveTag = curveTagFromString(curveStr);
+    if (curveTag == 0xff) {
+      throw jsi::JSError(rt, std::string(op) + ": unknown curve");
+    }
+    // For ECDSA curves, validate the scalar lies in [1, n-1] before storing
+    // — otherwise sign-time would surface a confusing "invalid private key".
+    // Ed25519 accepts any 32-byte seed (clamped internally), so skip there.
+    if (curveTag == kCurveTagSecp256k1 || curveTag == kCurveTagNist256p1) {
+      const ecdsa_curve* curve = ecdsaCurveFromTag(curveTag);
+      uint8_t probe[33];
+      if (ecdsa_get_public_key33(curve, priv.data(rt), probe) != 0) {
+        memzero(probe, sizeof(probe));
+        throw jsi::JSError(
+          rt, std::string(op) + ": private key out of range for curve");
+      }
+      memzero(probe, sizeof(probe));
+    }
+    std::string acStr = requireStringAt(rt, op, "accessControl", args, count, 3);
+    AccessControl ac = parseAccessControl(rt, op, acStr);
+    uint32_t window = parseValidityWindow(rt, op, args, count, 4);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 5);
+    std::vector<uint8_t> wrapped = wrapRawSlot(curveTag, priv.data(rt));
+
+    return makePromiseAsync<bool>(
+      rt, op,
+      [alias = std::move(alias), wrapped = std::move(wrapped), ac, window,
+       prompt = std::move(prompt)]() mutable -> bool {
+        try {
+          SecureKVBackend::set(
+            alias, wrapped.data(), wrapped.size(), ac, window, prompt);
+        } catch (...) {
+          memzero(wrapped.data(), wrapped.size());
+          throw;
+        }
+        memzero(wrapped.data(), wrapped.size());
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value { return jsi::Value::undefined(); }
+    );
   });
 }
 
 jsi::Value invoke_raw_get_public(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_get_public_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_raw_get_public";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    bool compact = requireBoolAt(rt, op, "compact", args, count, 1);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), compact,
+       prompt = std::move(prompt)]() -> ByteVec {
+        RawKey k;
+        loadRawKey(alias, k, -1, prompt);
+
+        ByteVec out;
+        if (k.curveTag == kCurveTagEd25519) {
+          out.resize(32);
+          ed25519_publickey(k.priv, out.data());
+        } else {
+          const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
+          out.resize(compact ? 33 : 65);
+          int err = compact
+            ? ecdsa_get_public_key33(curve, k.priv, out.data())
+            : ecdsa_get_public_key65(curve, k.priv, out.data());
+          if (err != 0) {
+            memzero(&k, sizeof(k));
+            throw std::runtime_error("invalid private key");
+          }
+        }
+        memzero(&k, sizeof(k));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_raw_sign_ecdsa(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_sign_ecdsa_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_raw_sign_ecdsa";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 1);
+    if (digest.size(rt) != 32) {
+      throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
+    }
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), digestBytes = std::move(digestBytes),
+       prompt = std::move(prompt)]() -> ByteVec {
+        RawKey k;
+        loadRawKey(alias, k, -1, prompt);
+        if (k.curveTag != kCurveTagSecp256k1 &&
+            k.curveTag != kCurveTagNist256p1) {
+          memzero(&k, sizeof(k));
+          throw std::runtime_error(
+            "ECDSA requires secp256k1 or nist256p1 slot");
+        }
+        const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
+        ByteVec out(65);
+        uint8_t pby = 0;
+        int err = ecdsa_sign_digest(
+          curve, k.priv, digestBytes.data(), out.data() + 1, &pby, nullptr);
+        memzero(&k, sizeof(k));
+        if (err != 0) {
+          memzero(out.data(), out.size());
+          throw std::runtime_error("signing failed");
+        }
+        out[0] = pby;
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
+  });
+}
+
+jsi::Value invoke_raw_sign_schnorr_impl(
+  jsi::Runtime& rt,
+  const jsi::Value* args,
+  size_t count,
+  const char* op,
+  bool taproot
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto digest = requireArrayBufferAt(rt, op, "digest", args, count, 1);
+    if (digest.size(rt) != 32) {
+      throw jsi::JSError(rt, std::string(op) + ": digest must be 32 bytes");
+    }
+    ByteVec extraBytes;
+    bool hasExtra = false;
+    if (count > 2 && !args[2].isUndefined() && !args[2].isNull()) {
+      auto extra = requireArrayBufferAt(
+        rt, op, taproot ? "merkleRoot" : "aux", args, count, 2);
+      size_t elen = extra.size(rt);
+      if (!taproot && elen != 32) {
+        throw jsi::JSError(rt, std::string(op) + ": aux must be 32 bytes");
+      }
+      extraBytes.assign(extra.data(rt), extra.data(rt) + elen);
+      hasExtra = true;
+    }
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 3);
+    ByteVec digestBytes(digest.data(rt), digest.data(rt) + 32);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias),
+       digestBytes = std::move(digestBytes),
+       extraBytes = std::move(extraBytes), hasExtra, taproot,
+       prompt = std::move(prompt)]() -> ByteVec {
+        RawKey k;
+        loadRawKey(alias, k, kCurveTagSecp256k1, prompt);
+
+        uint8_t signingPriv[32];
+        const uint8_t* extraPtr = hasExtra ? extraBytes.data() : nullptr;
+        size_t extraLen = hasExtra ? extraBytes.size() : 0;
+        if (taproot) {
+          if (!schnorr_internal::tweakPrivate(
+                k.priv, extraPtr, extraLen, signingPriv)) {
+            memzero(&k, sizeof(k));
+            memzero(signingPriv, sizeof(signingPriv));
+            throw std::runtime_error("tap-tweak failed");
+          }
+        } else {
+          std::memcpy(signingPriv, k.priv, 32);
+        }
+        memzero(&k, sizeof(k));
+
+        ByteVec out(64);
+        bool ok = schnorr_internal::sign(
+          signingPriv, digestBytes.data(),
+          taproot ? nullptr : extraPtr,
+          out.data());
+        memzero(signingPriv, sizeof(signingPriv));
+        if (!ok) {
+          memzero(out.data(), out.size());
+          throw std::runtime_error("signing failed");
+        }
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_raw_sign_schnorr(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_sign_schnorr_impl(
-      rt, args, count, "secure_kv_raw_sign_schnorr", /*taproot*/ false);
-  });
+  return invoke_raw_sign_schnorr_impl(
+    rt, args, count, "secure_kv_raw_sign_schnorr", /*taproot*/ false);
 }
 
 jsi::Value invoke_raw_sign_schnorr_taproot(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_sign_schnorr_impl(
-      rt, args, count, "secure_kv_raw_sign_schnorr_taproot", /*taproot*/ true);
-  });
+  return invoke_raw_sign_schnorr_impl(
+    rt, args, count, "secure_kv_raw_sign_schnorr_taproot", /*taproot*/ true);
 }
 
 jsi::Value invoke_raw_sign_ed25519(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_sign_ed25519_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_raw_sign_ed25519";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto msg = requireArrayBufferAt(rt, op, "msg", args, count, 1);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    ByteVec msgBytes;
+    msgBytes.assign(safeData(rt, msg), safeData(rt, msg) + msg.size(rt));
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), msgBytes = std::move(msgBytes),
+       prompt = std::move(prompt)]() -> ByteVec {
+        RawKey k;
+        loadRawKey(alias, k, kCurveTagEd25519, prompt);
+
+        ByteVec out(64);
+        const uint8_t kEmpty = 0;
+        const uint8_t* mp = msgBytes.empty() ? &kEmpty : msgBytes.data();
+        ed25519_sign(mp, msgBytes.size(), k.priv, out.data());
+        memzero(&k, sizeof(k));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 jsi::Value invoke_raw_ecdh(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    return raw_ecdh_sync(rt, args, count);
+  return safeAsyncThunk(rt, [&] {
+    const char* op = "secure_kv_raw_ecdh";
+    std::string alias = requireStringAt(rt, op, "key", args, count, 0);
+    requireValidKey(rt, op, alias);
+    auto pub = requireArrayBufferAt(rt, op, "peerPub", args, count, 1);
+    size_t publen = pub.size(rt);
+    if (publen != 33 && publen != 65) {
+      throw jsi::JSError(rt, std::string(op) + ": peerPub must be 33 or 65 bytes");
+    }
+    BiometricPromptCopy prompt = parsePromptCopy(rt, op, args, count, 2);
+    ByteVec pubBytes(pub.data(rt), pub.data(rt) + publen);
+
+    return makePromiseAsync<ByteVec>(
+      rt, op,
+      [alias = std::move(alias), pubBytes = std::move(pubBytes),
+       prompt = std::move(prompt)]() -> ByteVec {
+        RawKey k;
+        loadRawKey(alias, k, -1, prompt);
+        if (k.curveTag != kCurveTagSecp256k1 &&
+            k.curveTag != kCurveTagNist256p1) {
+          memzero(&k, sizeof(k));
+          throw std::runtime_error(
+            "ECDH requires secp256k1 or nist256p1 slot");
+        }
+        const ecdsa_curve* curve = ecdsaCurveFromTag(k.curveTag);
+        uint8_t full[65];
+        int err = ecdh_multiply(curve, k.priv, pubBytes.data(), full);
+        memzero(&k, sizeof(k));
+        if (err != 0) {
+          memzero(full, sizeof(full));
+          throw std::runtime_error("shared secret computation failed");
+        }
+        ByteVec out(33);
+        out[0] = 0x02 | (full[64] & 0x01);
+        std::memcpy(out.data() + 1, full + 1, 32);
+        memzero(full, sizeof(full));
+        return out;
+      },
+      [](jsi::Runtime& rt, ByteVec&& bg) -> jsi::Value {
+        return wrapDigest(rt, std::move(bg));
+      }
+    );
   });
 }
 
 }  // namespace
 
 void registerSecureKVSignMethods(MethodMap& map) {
-  // BIP-32 / SLIP-10 derivation on a stored seed
-  map.push_back({"secure_kv_bip32_set_seed",            4, invoke_bip32_set_seed});
-  map.push_back({"secure_kv_bip32_fingerprint",         3, invoke_bip32_fingerprint});
-  map.push_back({"secure_kv_bip32_get_public",          4, invoke_bip32_get_public});
-  map.push_back({"secure_kv_bip32_sign_ecdsa",          4, invoke_bip32_sign_ecdsa});
-  map.push_back({"secure_kv_bip32_sign_schnorr",        4, invoke_bip32_sign_schnorr});
-  map.push_back({"secure_kv_bip32_sign_schnorr_taproot",4, invoke_bip32_sign_schnorr_taproot});
-  map.push_back({"secure_kv_bip32_sign_ed25519",        3, invoke_bip32_sign_ed25519});
-  map.push_back({"secure_kv_bip32_ecdh",                4, invoke_bip32_ecdh});
+  // BIP-32 / SLIP-10 derivation on a stored seed.
+  // ArgCount = base + 3 prompt strings (title, subtitle, cancelLabel).
+  map.push_back({"secure_kv_bip32_set_seed",            7, invoke_bip32_set_seed});
+  map.push_back({"secure_kv_bip32_fingerprint",         6, invoke_bip32_fingerprint});
+  map.push_back({"secure_kv_bip32_get_public",          7, invoke_bip32_get_public});
+  map.push_back({"secure_kv_bip32_sign_ecdsa",          7, invoke_bip32_sign_ecdsa});
+  map.push_back({"secure_kv_bip32_sign_schnorr",        7, invoke_bip32_sign_schnorr});
+  map.push_back({"secure_kv_bip32_sign_schnorr_taproot",7, invoke_bip32_sign_schnorr_taproot});
+  map.push_back({"secure_kv_bip32_sign_ed25519",        6, invoke_bip32_sign_ed25519});
+  map.push_back({"secure_kv_bip32_ecdh",                7, invoke_bip32_ecdh});
 
-  // Raw 32-byte private key without derivation
-  map.push_back({"secure_kv_raw_set_private",           5, invoke_raw_set_private});
-  map.push_back({"secure_kv_raw_get_public",            2, invoke_raw_get_public});
-  map.push_back({"secure_kv_raw_sign_ecdsa",            2, invoke_raw_sign_ecdsa});
-  map.push_back({"secure_kv_raw_sign_schnorr",          3, invoke_raw_sign_schnorr});
-  map.push_back({"secure_kv_raw_sign_schnorr_taproot",  3, invoke_raw_sign_schnorr_taproot});
-  map.push_back({"secure_kv_raw_sign_ed25519",          2, invoke_raw_sign_ed25519});
-  map.push_back({"secure_kv_raw_ecdh",                  2, invoke_raw_ecdh});
+  // Raw 32-byte private key without derivation.
+  map.push_back({"secure_kv_raw_set_private",           8, invoke_raw_set_private});
+  map.push_back({"secure_kv_raw_get_public",            5, invoke_raw_get_public});
+  map.push_back({"secure_kv_raw_sign_ecdsa",            5, invoke_raw_sign_ecdsa});
+  map.push_back({"secure_kv_raw_sign_schnorr",          6, invoke_raw_sign_schnorr});
+  map.push_back({"secure_kv_raw_sign_schnorr_taproot",  6, invoke_raw_sign_schnorr_taproot});
+  map.push_back({"secure_kv_raw_sign_ed25519",          5, invoke_raw_sign_ed25519});
+  map.push_back({"secure_kv_raw_ecdh",                  5, invoke_raw_ecdh});
 }
 
 }  // namespace facebook::react::cryptolib

@@ -252,14 +252,24 @@ export interface RawSpec {
    */
   /** accessControl is "none" | "biometric" — see AccessControl in
    *  cpp/SecureKVBackend.h. validityWindow (seconds) is honoured only
-   *  for the biometric variant; 0 = per-call prompt. */
+   *  for the biometric variant; 0 = per-call prompt.
+   *  promptTitle / promptSubtitle / promptCancel are platform copy for
+   *  the biometric prompt — empty string falls back to defaults. */
   secure_kv_set(
     key: string,
     value: ArrayBuffer,
     accessControl: string,
-    validityWindow: number
+    validityWindow: number,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<void>;
-  secure_kv_get(key: string): Promise<ArrayBuffer | null>;
+  secure_kv_get(
+    key: string,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
+  ): Promise<ArrayBuffer | null>;
   secure_kv_has(key: string): Promise<boolean>;
   secure_kv_delete(key: string): Promise<void>;
   secure_kv_list(): Promise<string[]>;
@@ -267,6 +277,11 @@ export interface RawSpec {
   secure_kv_is_hardware_backed(): Promise<boolean>;
   /** Returns one of `BiometricStatus`'s enum values as a string. */
   secure_kv_biometric_status(): Promise<string>;
+  /** Drops cached biometric auth for the given alias (empty string = all
+   *  aliases). iOS-only effect: invalidates the per-alias `LAContext`.
+   *  No-op on Android — Keystore validity windows can't be cleared from
+   *  userland; callers wait for expiry or use `validityWindow: 0`. */
+  secure_kv_invalidate_session(alias: string): Promise<void>;
 
   /**
    * Native-only signing on top of secureKV slots.
@@ -293,47 +308,71 @@ export interface RawSpec {
     key: string,
     seed: ArrayBuffer,
     accessControl: string,
-    validityWindow: number
+    validityWindow: number,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<void>;
   secure_kv_bip32_fingerprint(
     key: string,
     path: ArrayBuffer,
-    curve: string
+    curve: string,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<number>;
   secure_kv_bip32_get_public(
     key: string,
     path: ArrayBuffer,
     curve: string,
-    compact: boolean
+    compact: boolean,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ecdsa(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
-    curve: string
+    curve: string,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
-    aux: ArrayBuffer | null
+    aux: ArrayBuffer | null,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_schnorr_taproot(
     key: string,
     path: ArrayBuffer,
     digest: ArrayBuffer,
-    merkleRoot: ArrayBuffer | null
+    merkleRoot: ArrayBuffer | null,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_sign_ed25519(
     key: string,
     path: ArrayBuffer,
-    msg: ArrayBuffer
+    msg: ArrayBuffer,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_bip32_ecdh(
     key: string,
     path: ArrayBuffer,
     peerPub: ArrayBuffer,
-    curve: string
+    curve: string,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
 
   secure_kv_raw_set_private(
@@ -341,28 +380,55 @@ export interface RawSpec {
     priv: ArrayBuffer,
     curve: string,
     accessControl: string,
-    validityWindow: number
+    validityWindow: number,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<void>;
-  secure_kv_raw_get_public(key: string, compact: boolean): Promise<ArrayBuffer>;
+  secure_kv_raw_get_public(
+    key: string,
+    compact: boolean,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
+  ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ecdsa(
     key: string,
-    digest: ArrayBuffer
+    digest: ArrayBuffer,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr(
     key: string,
     digest: ArrayBuffer,
-    aux: ArrayBuffer | null
+    aux: ArrayBuffer | null,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_schnorr_taproot(
     key: string,
     digest: ArrayBuffer,
-    merkleRoot: ArrayBuffer | null
+    merkleRoot: ArrayBuffer | null,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
   secure_kv_raw_sign_ed25519(
     key: string,
-    msg: ArrayBuffer
+    msg: ArrayBuffer,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
   ): Promise<ArrayBuffer>;
-  secure_kv_raw_ecdh(key: string, peerPub: ArrayBuffer): Promise<ArrayBuffer>;
+  secure_kv_raw_ecdh(
+    key: string,
+    peerPub: ArrayBuffer,
+    promptTitle: string,
+    promptSubtitle: string,
+    promptCancel: string
+  ): Promise<ArrayBuffer>;
 
   /**
    * Standalone biometric prompt — UX gate, **not** a cryptographic

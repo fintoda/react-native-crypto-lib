@@ -23,6 +23,8 @@ import java.security.UnrecoverableKeyException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import android.util.Log
 import javax.crypto.AEADBadTagException
 import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
@@ -63,14 +65,36 @@ class SecureKVBiometricException(msg: String) : RuntimeException(msg)
  *   with `setUserAuthenticationRequired(true)`; each `doFinal` requires
  *   a successful biometric prompt via `BiometricPrompt(CryptoObject)`.
  *
- * Blob format on disk (single byte added vs Phase 1):
+ * Blob format on disk. The leading variant byte both identifies the
+ * access-control kind and pins the on-disk layout — old layouts are
+ * kept readable for backward compat.
  *
- *     [ 1 byte variant      ] ← 0=None, 1=Biometric (AccessControl enum)
+ *   Non-biometric (variant=0):
+ *     [ 1 byte variant=0    ]
  *     [ 12 bytes IV         ]
  *     [ ciphertext + 16-byte GCM tag ] ← AES-GCM(plain)
  *
+ *   Biometric v1 (variant=1, LEGACY, pre-0.10.0 — read-only):
+ *     [ 1 byte variant=1    ]
+ *     [ 4 bytes window BE   ]
+ *     [ 12 bytes IV         ]
+ *     [ ciphertext + 16-byte GCM tag ]
+ *   listJoined() can't surface their names without prompting and
+ *   silently omits them; rewrite via set() to upgrade to v2.
+ *
+ *   Biometric v2 (variant=2, current — new writes always use this):
+ *     [ 1 byte variant=2    ]
+ *     [ 4 bytes window BE   ]
+ *     [ 2 bytes keyLen BE   ]
+ *     [ keyLen bytes UTF-8 key ]   ← plaintext, lets list() enumerate
+ *     [ 12 bytes IV         ]
+ *     [ ciphertext + 16-byte GCM tag ]
+ *
  * The variant byte is plaintext so we can route a read to the correct
  * master key (and so we know to prompt) before any biometric eval.
+ * Distinct variant values for v1/v2 means parseBlob can never confuse
+ * a random IV byte for a v2 keyLen field — a real concern if v1 and
+ * v2 shared the same variant byte.
  *
  * Plaintext encodes the original key alongside the value so list() can
  * recover the user-facing key names without a separate index file:
@@ -101,10 +125,40 @@ object SecureKVBridge {
   // Biometric blobs additionally carry a 4-byte BE window (seconds)
   // immediately after the variant byte. Non-biometric blobs do not.
   private const val WINDOW_LEN = 4
+  // Biometric blob format v2 (introduced in 0.10.0) also carries a
+  // 2-byte BE plaintext key length + the UTF-8 key bytes immediately
+  // after the window. This lets `list()` enumerate biometric items
+  // without prompting per blob (the encrypted plaintext also carries a
+  // copy of the key for tamper-detection — see decodePlain). Legacy
+  // v1 blobs (no plaintext key prefix) are detected by length and
+  // remain readable but invisible to `list()` until rewritten.
+  private const val KEY_PREFIX_LEN_LEN = 2
+  // Practical cap mirroring the JSI-side validation; the actual cap
+  // is enforced by requireValidKey() in cpp/SecureKVCommon.h.
+  private const val KEY_PREFIX_MAX = 1024
 
-  // Mirrors cpp/SecureKVBackend.h's AccessControl enum.
+  // Mirrors cpp/SecureKVBackend.h's AccessControl enum used at the
+  // C++/JNI boundary. The blob's leading byte ALSO uses 0/1 for legacy
+  // (v1) blobs, but new writes use BLOB_VARIANT_BIOMETRIC_V2 (=2) for
+  // biometric items so list() can extract the plaintext key prefix
+  // without confusing v1 IV bytes for a v2 keyLen field.
   private const val ACCESS_CONTROL_NONE: Int = 0
   private const val ACCESS_CONTROL_BIOMETRIC: Int = 1
+
+  // On-disk blob variants. Differs from AccessControl: the variant byte
+  // identifies BOTH the access-control kind and the on-disk layout.
+  // - 0 = non-biometric (no prompt, no plaintext header)
+  // - 1 = biometric v1 (LEGACY, pre-0.10.0): [variant][window][IV][cipher]
+  //       Pre-0.10.0 wrote these. Read-only for backward compat — list()
+  //       can't surface their names because the key lives only in the
+  //       encrypted plaintext. Hosts that need names must rewrite via
+  //       set() to upgrade to v2.
+  // - 2 = biometric v2 (current): adds [keyLen][key UTF-8] to the header
+  //       so list() can enumerate without prompting. New writes always
+  //       emit this.
+  private const val BLOB_VARIANT_NONE: Int = 0
+  private const val BLOB_VARIANT_BIOMETRIC_V1: Int = 1
+  private const val BLOB_VARIANT_BIOMETRIC_V2: Int = 2
 
   // BiometricPrompt show + wait timeout. The OS will dismiss after its own
   // inactivity policy long before this fires; this is the absolute backstop
@@ -131,6 +185,11 @@ object SecureKVBridge {
   // Held to keep the lock alive for the lifetime of this process. Never
   // closed — closing the channel would drop the FileLock.
   @Suppress("unused") @Volatile private var processLockFile: RandomAccessFile? = null
+
+  // One-shot guard for the API 28-29 validity-window downgrade warning.
+  // Avoids spamming logcat when the host calls `set()` repeatedly with
+  // a window > 0 on legacy devices.
+  private val legacyWindowWarned = AtomicBoolean(false)
 
   // --- Plumbing -------------------------------------------------------------
 
@@ -434,7 +493,18 @@ object SecureKVBridge {
    * UI thread and wait. The JS thread (where this is called from via
    * JNI) is distinct from the UI thread on RN, so blocking is safe.
    */
-  private fun runBiometricPrompt(cipher: Cipher, op: String): Cipher {
+  private fun runBiometricPrompt(cipher: Cipher, op: String): Cipher =
+    runBiometricPromptInternal(
+      cipher, op, "Authenticate", "Unlock secure storage", "Cancel"
+    )
+
+  private fun runBiometricPromptInternal(
+    cipher: Cipher,
+    op: String,
+    title: String,
+    subtitle: String,
+    cancelLabel: String
+  ): Cipher {
     val activity = currentFragmentActivity()
 
     // Result transport. Filled in exactly once by the prompt callback.
@@ -476,13 +546,14 @@ object SecureKVBridge {
       }
     }
 
-    // PromptInfo is per-show, not per-key. Caller-facing copy here is
-    // intentionally generic — host apps can wrap secureKV in their own
-    // domain-specific UI if they want richer messaging.
+    // PromptInfo is per-show, not per-key. Labels come from the
+    // caller's BiometricPromptOptions; runBiometricPromptWithLabels
+    // applies platform defaults for any empty field before reaching
+    // here, so we can use them directly.
     val promptInfo = BiometricPrompt.PromptInfo.Builder()
-      .setTitle("Authenticate")
-      .setSubtitle("Unlock secure storage")
-      .setNegativeButtonText("Cancel")
+      .setTitle(title)
+      .setSubtitle(subtitle)
+      .setNegativeButtonText(cancelLabel)
       .setAllowedAuthenticators(
         androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
       )
@@ -602,14 +673,43 @@ object SecureKVBridge {
     }
   }
 
-  // Default labels used by the secureKV biometric paths, where the
-  // prompt copy is intentionally generic — host apps that want
-  // domain-specific copy use [biometricAuthenticate] for UX gates and
-  // wrap secureKV with their own UI on top of it.
+  // Default labels used by the secureKV biometric paths when the host
+  // didn't supply BiometricPromptOptions. Host apps that want
+  // per-operation copy pass non-empty title/subtitle/cancelLabel into
+  // `set()` / `get()`; empty strings fall back to these defaults.
   private fun runBiometricPromptDeviceUnlock(op: String) {
-    runBiometricPromptDeviceUnlock(
-      "Authenticate", "Unlock secure storage", "Cancel", op
-    )
+    runBiometricPromptDeviceUnlockWithLabels(op, "", "", "")
+  }
+
+  // Caller-supplied labels variant. Empty strings fall back to platform
+  // defaults so cross-platform code can pass `""` to mean "use system
+  // default copy".
+  private fun runBiometricPromptDeviceUnlockWithLabels(
+    op: String,
+    title: String,
+    subtitle: String,
+    cancelLabel: String
+  ) {
+    val t = if (title.isEmpty()) "Authenticate" else title
+    val s = if (subtitle.isEmpty()) "Unlock secure storage" else subtitle
+    val c = if (cancelLabel.isEmpty()) "Cancel" else cancelLabel
+    runBiometricPromptDeviceUnlock(t, s, c, op)
+  }
+
+  // CryptoObject-bound prompt with caller-supplied labels. Falls back to
+  // the same defaults as runBiometricPromptDeviceUnlock for any empty
+  // field so callers can pass `""` to mean "use platform default".
+  private fun runBiometricPromptWithLabels(
+    cipher: Cipher,
+    op: String,
+    title: String,
+    subtitle: String,
+    cancelLabel: String
+  ): Cipher {
+    val t = if (title.isEmpty()) "Authenticate" else title
+    val s = if (subtitle.isEmpty()) "Unlock secure storage" else subtitle
+    val c = if (cancelLabel.isEmpty()) "Cancel" else cancelLabel
+    return runBiometricPromptInternal(cipher, op, t, s, c)
   }
 
   /**
@@ -662,7 +762,10 @@ object SecureKVBridge {
     masterKey: SecretKey,
     iv: ByteArray,
     sealed: ByteArray,
-    validityWindowSec: Int
+    validityWindowSec: Int,
+    promptTitle: String,
+    promptSubtitle: String,
+    promptCancel: String
   ): ByteArray {
     fun freshInit(): Cipher {
       val c = Cipher.getInstance("AES/GCM/NoPadding")
@@ -685,7 +788,9 @@ object SecureKVBridge {
       } catch (e: GeneralSecurityException) {
         mapInitFailure(e)
       }
-      val authed = runBiometricPrompt(cipher, "secureKV.get")
+      val authed = runBiometricPromptWithLabels(
+        cipher, "secureKV.get", promptTitle, promptSubtitle, promptCancel
+      )
       return try {
         authed.doFinal(sealed)
       } catch (e: GeneralSecurityException) {
@@ -697,7 +802,9 @@ object SecureKVBridge {
     // anywhere (init or doFinal), prompt without CryptoObject to
     // re-arm the validity window, then retry with a fresh cipher.
     fun retryAfterPromptUnlock(): ByteArray {
-      runBiometricPromptDeviceUnlock("secureKV.get")
+      runBiometricPromptDeviceUnlockWithLabels(
+        "secureKV.get", promptTitle, promptSubtitle, promptCancel
+      )
       val c = try {
         freshInit()
       } catch (e: GeneralSecurityException) {
@@ -757,10 +864,18 @@ object SecureKVBridge {
   }
 
   private data class ParsedBlob(
-    val variant: Int,
+    // The AccessControl value (0 = none, 1 = biometric) that the read
+    // path needs in order to pick the right master key. The on-disk
+    // variant byte may be 0/1/2 (we collapse v1+v2 biometric back to
+    // ACCESS_CONTROL_BIOMETRIC here) — callers shouldn't care which
+    // disk format was used, only what gating to apply.
+    val accessControl: Int,
     val validityWindowSec: Int,  // 0 for non-biometric
     val iv: ByteArray,
-    val sealed: ByteArray
+    val sealed: ByteArray,
+    // v2 biometric blobs only — null for v1 / non-biometric. list()
+    // surfaces this name without prompting; v1 blobs are skipped.
+    val plaintextKey: String?
   )
 
   private fun parseBlob(blob: ByteArray): ParsedBlob {
@@ -769,38 +884,90 @@ object SecureKVBridge {
     }
     val variant = blob[0].toInt() and 0xff
     when (variant) {
-      ACCESS_CONTROL_NONE -> {
+      BLOB_VARIANT_NONE -> {
         val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
         val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
-        return ParsedBlob(variant, 0, iv, sealed)
+        // Map disk variant back to the access-control value the rest of
+        // the bridge expects (BLOB_VARIANT_NONE == ACCESS_CONTROL_NONE).
+        return ParsedBlob(
+          accessControl = ACCESS_CONTROL_NONE,
+          validityWindowSec = 0,
+          iv = iv,
+          sealed = sealed,
+          plaintextKey = null
+        )
       }
-      ACCESS_CONTROL_BIOMETRIC -> {
-        val withWindow =
-          VARIANT_LEN + WINDOW_LEN + IV_LEN + TAG_BITS / 8
-        if (blob.size < withWindow) {
+      BLOB_VARIANT_BIOMETRIC_V1 -> {
+        // Legacy: [variant][window 4B][IV 12B][cipher+tag]
+        val minLen = VARIANT_LEN + WINDOW_LEN + IV_LEN + TAG_BITS / 8
+        if (blob.size < minLen) {
           throw SecureKVUnavailableException(
-            "unavailable: biometric blob truncated"
+            "unavailable: biometric v1 blob truncated"
           )
         }
-        val window =
-          ((blob[1].toInt() and 0xff) shl 24) or
-          ((blob[2].toInt() and 0xff) shl 16) or
-          ((blob[3].toInt() and 0xff) shl 8) or
-          (blob[4].toInt() and 0xff)
+        val window = readBeU32(blob, 1)
         val iv = blob.copyOfRange(
-          VARIANT_LEN + WINDOW_LEN,
-          VARIANT_LEN + WINDOW_LEN + IV_LEN
+          VARIANT_LEN + WINDOW_LEN, VARIANT_LEN + WINDOW_LEN + IV_LEN
         )
-        val sealed = blob.copyOfRange(
-          VARIANT_LEN + WINDOW_LEN + IV_LEN, blob.size
+        val sealed = blob.copyOfRange(VARIANT_LEN + WINDOW_LEN + IV_LEN, blob.size)
+        return ParsedBlob(
+          accessControl = ACCESS_CONTROL_BIOMETRIC,
+          validityWindowSec = window,
+          iv = iv,
+          sealed = sealed,
+          // v1 has no plaintext key — list() skips these.
+          plaintextKey = null
         )
-        return ParsedBlob(variant, window, iv, sealed)
+      }
+      BLOB_VARIANT_BIOMETRIC_V2 -> {
+        // [variant][window 4B][keyLen 2B BE][key UTF-8][IV 12B][cipher+tag]
+        val minLen =
+          VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + IV_LEN + TAG_BITS / 8
+        if (blob.size < minLen) {
+          throw SecureKVUnavailableException(
+            "unavailable: biometric v2 blob truncated"
+          )
+        }
+        val window = readBeU32(blob, 1)
+        val keyLen =
+          ((blob[VARIANT_LEN + WINDOW_LEN].toInt() and 0xff) shl 8) or
+            (blob[VARIANT_LEN + WINDOW_LEN + 1].toInt() and 0xff)
+        if (keyLen < 1 || keyLen > KEY_PREFIX_MAX) {
+          throw SecureKVUnavailableException(
+            "unavailable: biometric v2 keyLen out of range ($keyLen)"
+          )
+        }
+        val keyStart = VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN
+        val ivStart = keyStart + keyLen
+        if (blob.size < ivStart + IV_LEN + TAG_BITS / 8) {
+          throw SecureKVUnavailableException(
+            "unavailable: biometric v2 blob too short for declared keyLen"
+          )
+        }
+        val plaintextKey =
+          String(blob.copyOfRange(keyStart, ivStart), Charsets.UTF_8)
+        val iv = blob.copyOfRange(ivStart, ivStart + IV_LEN)
+        val sealed = blob.copyOfRange(ivStart + IV_LEN, blob.size)
+        return ParsedBlob(
+          accessControl = ACCESS_CONTROL_BIOMETRIC,
+          validityWindowSec = window,
+          iv = iv,
+          sealed = sealed,
+          plaintextKey = plaintextKey
+        )
       }
       else ->
         throw SecureKVUnavailableException(
           "unavailable: unknown blob variant $variant"
         )
     }
+  }
+
+  private fun readBeU32(b: ByteArray, off: Int): Int {
+    return ((b[off].toInt() and 0xff) shl 24) or
+      ((b[off + 1].toInt() and 0xff) shl 16) or
+      ((b[off + 2].toInt() and 0xff) shl 8) or
+      (b[off + 3].toInt() and 0xff)
   }
 
   // --- Public API ----------------------------------------------------------
@@ -810,7 +977,10 @@ object SecureKVBridge {
     key: String,
     value: ByteArray,
     accessControl: Int,
-    validityWindowSec: Int
+    validityWindowSec: Int,
+    promptTitle: String,
+    promptSubtitle: String,
+    promptCancel: String
   ) {
     assertSingleProcess()
     if (accessControl != ACCESS_CONTROL_NONE &&
@@ -826,7 +996,31 @@ object SecureKVBridge {
           "secureKV: validityWindow must be >= 0 (got $validityWindowSec)"
         )
       }
-      validityWindowSec
+      // On API 28-29, Keystore expresses windowed auth via
+      // setUserAuthenticationValidityDurationSeconds, which considers
+      // ANY device unlock (PIN/pattern included) as a fresh auth event.
+      // That breaks the "biometric-only" guarantee, so downgrade to
+      // per-call (window=0) where the CryptoObject-bound BiometricPrompt
+      // is strictly biometric. Logged once per process to flag the
+      // implicit semantic change without spamming logcat.
+      if (validityWindowSec > 0 &&
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+      ) {
+        if (legacyWindowWarned.compareAndSet(false, true)) {
+          Log.w(
+            "secureKV",
+            "validityWindow=$validityWindowSec downgraded to 0 on " +
+              "API ${Build.VERSION.SDK_INT}: legacy Keystore counts " +
+              "any device unlock as auth, which would weaken " +
+              "biometric-only enforcement. Per-call BiometricPrompt " +
+              "is used instead. Upgrade to API 30+ for true windowed " +
+              "biometric sessions."
+          )
+        }
+        0
+      } else {
+        validityWindowSec
+      }
     } else {
       0
     }
@@ -869,7 +1063,9 @@ object SecureKVBridge {
           } catch (e: GeneralSecurityException) {
             throw SecureKVUnavailableException("unavailable: ${e.message}", e)
           }
-          val authed = runBiometricPrompt(c, "secureKV.set")
+          val authed = runBiometricPromptWithLabels(
+            c, "secureKV.set", promptTitle, promptSubtitle, promptCancel
+          )
           val out = try {
             authed.doFinal(plain)
           } catch (e: UserNotAuthenticatedException) {
@@ -881,15 +1077,33 @@ object SecureKVBridge {
         }
         else -> {
           fun retryAfterPromptUnlock(): Pair<ByteArray, ByteArray> {
-            runBiometricPromptDeviceUnlock("secureKV.set")
+            runBiometricPromptDeviceUnlockWithLabels(
+              "secureKV.set", promptTitle, promptSubtitle, promptCancel
+            )
             val c = try {
               freshInit()
             } catch (e: GeneralSecurityException) {
+              // After a successful prompt, init still failing for
+              // "not authenticated" means the validity window expired
+              // between the prompt and this init — surface as a
+              // biometric retry rather than master-key invalidation.
+              if (isUserNotAuthenticated(e)) {
+                throw SecureKVBiometricException(
+                  "secureKV.set: validity window expired between prompt " +
+                    "and operation; retry"
+                )
+              }
               throw SecureKVUnavailableException("unavailable: ${e.message}", e)
             }
             val out = try {
               c.doFinal(plain)
             } catch (e: GeneralSecurityException) {
+              if (isUserNotAuthenticated(e)) {
+                throw SecureKVBiometricException(
+                  "secureKV.set: validity window expired between prompt " +
+                    "and operation; retry"
+                )
+              }
               throw SecureKVUnavailableException("unavailable: ${e.message}", e)
             }
             return Pair(c.iv, out)
@@ -923,23 +1137,62 @@ object SecureKVBridge {
         }
       }
 
+      // Layout:
+      //   none      : [variant][IV][cipher+tag]
+      //   biometric : [variant][window BE][2B keyLen BE][key UTF-8][IV][cipher+tag]
+      // The plaintext key in the biometric header lets list() enumerate
+      // bio items without prompting per blob — names are not secrets.
+      // The encrypted plaintext also carries the key for tamper-detection
+      // (see decodePlain), so a malicious header rewrite is caught.
+      val keyBytes = if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
+        val kb = key.toByteArray(Charsets.UTF_8)
+        if (kb.size > KEY_PREFIX_MAX) {
+          throw IllegalArgumentException(
+            "secureKV: key UTF-8 length ${kb.size} exceeds blob format cap " +
+              "($KEY_PREFIX_MAX)"
+          )
+        }
+        kb
+      } else null
       val headerLen =
-        if (accessControl == ACCESS_CONTROL_BIOMETRIC) VARIANT_LEN + WINDOW_LEN
+        if (accessControl == ACCESS_CONTROL_BIOMETRIC)
+          VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN + (keyBytes?.size ?: 0)
         else VARIANT_LEN
       val out = ByteArray(headerLen + iv.size + sealed.size)
-      out[0] = accessControl.toByte()
-      if (accessControl == ACCESS_CONTROL_BIOMETRIC) {
+      // Disk variant is decoupled from accessControl: BIOMETRIC writes
+      // always use V2 (with the plaintext key prefix) so list() can
+      // enumerate without prompting. V1 is read-only legacy.
+      out[0] = if (accessControl == ACCESS_CONTROL_BIOMETRIC)
+        BLOB_VARIANT_BIOMETRIC_V2.toByte()
+      else
+        BLOB_VARIANT_NONE.toByte()
+      if (accessControl == ACCESS_CONTROL_BIOMETRIC && keyBytes != null) {
         out[1] = ((window ushr 24) and 0xff).toByte()
         out[2] = ((window ushr 16) and 0xff).toByte()
         out[3] = ((window ushr 8) and 0xff).toByte()
         out[4] = (window and 0xff).toByte()
+        out[5] = ((keyBytes.size ushr 8) and 0xff).toByte()
+        out[6] = (keyBytes.size and 0xff).toByte()
+        System.arraycopy(
+          keyBytes, 0, out, VARIANT_LEN + WINDOW_LEN + KEY_PREFIX_LEN_LEN,
+          keyBytes.size
+        )
       }
       System.arraycopy(iv, 0, out, headerLen, iv.size)
       System.arraycopy(sealed, 0, out, headerLen + iv.size, sealed.size)
 
       val file = blobFile(key)
       val tmp = File(file.parentFile, "${file.name}.tmp")
-      tmp.writeBytes(out)
+      // fsync the tmp file before rename so a power loss after the
+      // rename can never expose a half-written blob. Without this,
+      // ext4/f2fs may delay the data flush until after the metadata
+      // (rename) commit, and a crash in the gap leaves a sealed-but-
+      // truncated blob — GCM auth would catch it on next read, but the
+      // user sees SecureKVUnavailableError instead of "still old value".
+      RandomAccessFile(tmp, "rw").use { raf ->
+        raf.write(out)
+        try { raf.fd.sync() } catch (_: Throwable) { /* best effort */ }
+      }
       if (!tmp.renameTo(file)) {
         // Fall back to delete+rename if the platform refused atomic swap
         file.delete()
@@ -948,23 +1201,34 @@ object SecureKVBridge {
           throw RuntimeException("failed to write secureKV blob")
         }
       }
+      // Best-effort directory fsync so the rename survives a crash.
+      // Not all FS / Android versions honour this; ignore failures.
+      try {
+        RandomAccessFile(file.parentFile, "r").use { it.fd.sync() }
+      } catch (_: Throwable) { /* best effort */ }
     }
   }
 
   @JvmStatic
-  fun get(key: String): ByteArray? {
+  fun get(
+    key: String,
+    promptTitle: String,
+    promptSubtitle: String,
+    promptCancel: String
+  ): ByteArray? {
     assertSingleProcess()
     val file = blobFile(key)
     if (!file.isFile) return null
     val parsed = parseBlob(file.readBytes())
 
     val masterKey = getOrCreateMasterKey(
-      parsed.variant, parsed.validityWindowSec
+      parsed.accessControl, parsed.validityWindowSec
     )
 
-    val plain = if (parsed.variant == ACCESS_CONTROL_BIOMETRIC) {
+    val plain = if (parsed.accessControl == ACCESS_CONTROL_BIOMETRIC) {
       decryptBiometric(
-        masterKey, parsed.iv, parsed.sealed, parsed.validityWindowSec
+        masterKey, parsed.iv, parsed.sealed, parsed.validityWindowSec,
+        promptTitle, promptSubtitle, promptCancel
       )
     } else {
       val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -1007,14 +1271,18 @@ object SecureKVBridge {
 
   /**
    * Returns recovered keys joined by '\n'. The empty store is "" (zero
-   * keys). Biometric blobs ARE included — but their key names live
-   * inside the encrypted plaintext, so listing them requires biometric
-   * auth, one prompt per biometric blob. To avoid hammering the user
-   * with prompts during enumeration, we instead skip biometric blobs
-   * here and prefix their names from the stored variant byte: the
-   * caller can detect "biometric-only key" via `has()` if needed.
+   * keys). Both non-biometric and biometric blobs are enumerated:
    *
-   * Two error classes are still distinguished from the original design:
+   * - Non-biometric blobs decrypt without auth (the master key has no
+   *   user-auth gate); the key name comes from the encrypted plaintext.
+   * - Biometric blobs (v2 format, written by 0.10.0+) carry the key
+   *   name in the plaintext header so `list()` does not have to prompt
+   *   per blob. v1 biometric blobs (pre-0.10.0) had no plaintext key
+   *   prefix — those are silently skipped because reading them would
+   *   require N biometric prompts. Hosts that need full enumeration of
+   *   pre-0.10.0 biometric items must rewrite via `set()`.
+   *
+   * Two error classes are still distinguished:
    *   - master-key invalidation (KeyPermanentlyInvalidatedException,
    *     UnrecoverableKeyException) — propagates as
    *     SecureKVUnavailableException so the caller learns the entire
@@ -1029,10 +1297,20 @@ object SecureKVBridge {
     val files = dir.listFiles { _, name -> name.endsWith(".bin") }
       ?: return ""
 
-    val nonBioMaster = try {
-      getOrCreateMasterKey(ACCESS_CONTROL_NONE, 0)
-    } catch (e: GeneralSecurityException) {
-      throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+    // Lazily-resolved non-bio master key — only built if we actually
+    // see a non-bio blob. Avoids touching Keystore at all for stores
+    // that contain only biometric items (relevant on first install,
+    // tests, etc.).
+    var nonBioMaster: SecretKey? = null
+    fun nonBioMasterOrCreate(): SecretKey {
+      nonBioMaster?.let { return it }
+      val k = try {
+        getOrCreateMasterKey(ACCESS_CONTROL_NONE, 0)
+      } catch (e: GeneralSecurityException) {
+        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      }
+      nonBioMaster = k
+      return k
     }
 
     val out = StringBuilder()
@@ -1045,38 +1323,49 @@ object SecureKVBridge {
       if (blob.size < VARIANT_LEN + IV_LEN + TAG_BITS / 8) continue
       val variant = blob[0].toInt() and 0xff
 
-      // Biometric blobs cannot be enumerated without a prompt. We expose
-      // their existence via the synthetic `<biometric:N>` placeholder
-      // counts so callers can tell that *some* protected data is present
-      // without authenticating to read each name.
-      if (variant == ACCESS_CONTROL_BIOMETRIC) {
-        // Skip — caller learns about biometric blobs by attempting `get`
-        // on the alias they chose. We don't want a `list()` call to
-        // chain into N biometric prompts.
-        continue
+      val name: String? = when (variant) {
+        BLOB_VARIANT_NONE -> {
+          val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
+          val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
+          val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+          try {
+            cipher.init(
+              Cipher.DECRYPT_MODE, nonBioMasterOrCreate(),
+              GCMParameterSpec(TAG_BITS, iv)
+            )
+          } catch (e: KeyPermanentlyInvalidatedException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          } catch (e: UnrecoverableKeyException) {
+            throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+          }
+          val plain = try {
+            cipher.doFinal(sealed)
+          } catch (_: AEADBadTagException) { null }
+            catch (_: BadPaddingException) { null }
+          plain?.let { decodePlain(it).first }
+        }
+        BLOB_VARIANT_BIOMETRIC_V2 -> {
+          // Plaintext key prefix lets us enumerate without touching
+          // Keystore or prompting. parseBlob enforces the length range.
+          val parsed = try {
+            parseBlob(blob)
+          } catch (_: SecureKVUnavailableException) {
+            null
+          }
+          parsed?.plaintextKey
+        }
+        BLOB_VARIANT_BIOMETRIC_V1 -> {
+          // Legacy: name lives only inside the encrypted plaintext.
+          // Reading it would trigger a biometric prompt per blob; skip.
+          null
+        }
+        else -> null
       }
 
-      val iv = blob.copyOfRange(VARIANT_LEN, VARIANT_LEN + IV_LEN)
-      val sealed = blob.copyOfRange(VARIANT_LEN + IV_LEN, blob.size)
-      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-      try {
-        cipher.init(
-          Cipher.DECRYPT_MODE, nonBioMaster, GCMParameterSpec(TAG_BITS, iv)
-        )
-      } catch (e: KeyPermanentlyInvalidatedException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
-      } catch (e: UnrecoverableKeyException) {
-        throw SecureKVUnavailableException("unavailable: ${e.message}", e)
+      if (name != null) {
+        if (out.isNotEmpty()) out.append('\n')
+        out.append(name)
       }
-      val plain = try {
-        cipher.doFinal(sealed)
-      } catch (_: AEADBadTagException) {
-        continue
-      } catch (_: BadPaddingException) {
-        continue
-      }
-      if (out.isNotEmpty()) out.append('\n')
-      out.append(decodePlain(plain).first)
     }
     return out.toString()
   }
@@ -1090,6 +1379,29 @@ object SecureKVBridge {
       // guarantee for the rest of this process's lifetime.
       dir.listFiles()?.forEach {
         if (it.name != ".process.lock") it.delete()
+      }
+      // Rotate master keys too — the caller asked for a wipe, and
+      // leftover Keystore aliases (especially per-window biometric ones,
+      // `cryptolib.kv.master.bio.<N>.<pkg>`) accumulate over time as
+      // hosts experiment with different validityWindow values. Best
+      // effort: some OEM Keystore impls reject deletion of in-use keys
+      // — swallow those.
+      try {
+        val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        val pkg = appContext().packageName
+        val mainAlias = "$MASTER_KEY_PREFIX$pkg"
+        val bioSuffix = ".$pkg"
+        val toDelete = ks.aliases().toList().filter { alias ->
+          alias == mainAlias ||
+            (alias.startsWith(MASTER_KEY_BIO_PREFIX) &&
+              alias.endsWith(bioSuffix))
+        }
+        for (alias in toDelete) {
+          try { ks.deleteEntry(alias) } catch (_: Throwable) { /* best effort */ }
+        }
+      } catch (_: Throwable) {
+        // Keystore unreachable — blobs are already gone, that's the
+        // important part.
       }
     }
   }

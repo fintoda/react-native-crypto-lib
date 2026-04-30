@@ -8,10 +8,6 @@
 namespace facebook::react::cryptolib {
 namespace {
 
-[[noreturn]] void wrap(jsi::Runtime& rt, const char* op, const std::exception& e) {
-  throw jsi::JSError(rt, std::string(op) + ": " + e.what());
-}
-
 // Mirrors the BiometricStatus enum values used by JS. Kept identical
 // to the secureKV side so callers see one stable string set.
 const char* biometricStatusName(BiometricStatus s) {
@@ -29,38 +25,46 @@ const char* biometricStatusName(BiometricStatus s) {
 jsi::Value invoke_biometric_status(
   jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
 ) {
-  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
-    try {
-      auto s = SecureKVBackend::biometricStatus();
-      return jsi::String::createFromUtf8(rt, biometricStatusName(s));
-    } catch (const std::exception& e) {
-      wrap(rt, "biometric_status", e);
-    }
+  return safeAsyncThunk(rt, [&] {
+    return makePromiseAsync<BiometricStatus>(
+      rt, "biometric_status",
+      []() -> BiometricStatus {
+        return SecureKVBackend::biometricStatus();
+      },
+      [](jsi::Runtime& rt, BiometricStatus&& s) -> jsi::Value {
+        return jsi::String::createFromUtf8(rt, biometricStatusName(s));
+      }
+    );
   });
 }
 
 jsi::Value invoke_biometric_authenticate(
   jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
 ) {
-  auto title =
-    requireStringAt(rt, "biometric_authenticate", "title", args, count, 0);
-  auto subtitle =
-    requireStringAt(rt, "biometric_authenticate", "subtitle", args, count, 1);
-  auto cancelLabel = requireStringAt(
-    rt, "biometric_authenticate", "cancelLabel", args, count, 2);
-  return makePromise(
-    rt,
-    [t = std::move(title), s = std::move(subtitle), c = std::move(cancelLabel)](
-      jsi::Runtime& rt
-    ) -> jsi::Value {
-      try {
-        BiometricBackend::authenticate(t, s, c);
+  return safeAsyncThunk(rt, [&] {
+    // Validate prompt copy on the JS thread; the actual blocking prompt
+    // runs on a worker via makePromiseAsync so JS-thread animations and
+    // timers stay responsive while the user is presented with Face ID /
+    // fingerprint.
+    std::string title =
+      requireStringAt(rt, "biometric_authenticate", "title", args, count, 0);
+    std::string subtitle =
+      requireStringAt(rt, "biometric_authenticate", "subtitle", args, count, 1);
+    std::string cancelLabel = requireStringAt(
+      rt, "biometric_authenticate", "cancelLabel", args, count, 2);
+
+    return makePromiseAsync<bool>(
+      rt, "biometric_authenticate",
+      [title = std::move(title), subtitle = std::move(subtitle),
+       cancelLabel = std::move(cancelLabel)]() -> bool {
+        BiometricBackend::authenticate(title, subtitle, cancelLabel);
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value {
         return jsi::Value::undefined();
-      } catch (const std::exception& e) {
-        wrap(rt, "biometric_authenticate", e);
       }
-    }
-  );
+    );
+  });
 }
 
 }  // namespace

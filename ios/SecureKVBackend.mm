@@ -31,8 +31,26 @@ NSMutableDictionary<NSString*, LAContext*>* laContextCache() {
   return cached;
 }
 
+// Apple caps `touchIDAuthenticationAllowableReuseDuration` at
+// LATouchIDAuthenticationMaximumAllowableReuseDuration (300 seconds).
+// Larger values are silently clamped by the framework; we mirror the
+// cap explicitly so the JS-side semantics match what iOS will actually
+// honour, and so the caller learns about the cap via a one-shot log.
+static const uint32_t kMaxReuseDurationSec = 300;
+
 LAContext* contextForRead(NSString* alias, uint32_t windowSec) {
-  if (windowSec == 0) {
+  uint32_t effective = windowSec;
+  if (windowSec > kMaxReuseDurationSec) {
+    static dispatch_once_t warnOnce;
+    dispatch_once(&warnOnce, ^{
+      NSLog(
+        @"[secureKV] validityWindow=%u capped to %us on iOS "
+        @"(LATouchIDAuthenticationMaximumAllowableReuseDuration)",
+        windowSec, kMaxReuseDurationSec);
+    });
+    effective = kMaxReuseDurationSec;
+  }
+  if (effective == 0) {
     // No reuse — fresh context every read so iOS prompts every time.
     LAContext* ctx = [[LAContext alloc] init];
     ctx.touchIDAuthenticationAllowableReuseDuration = 0;
@@ -47,7 +65,7 @@ LAContext* contextForRead(NSString* alias, uint32_t windowSec) {
     // Keep the duration in sync with the stored window — the caller may
     // have re-provisioned with a different window since last cached.
     ctx.touchIDAuthenticationAllowableReuseDuration =
-      (NSTimeInterval)windowSec;
+      (NSTimeInterval)effective;
     return ctx;
   }
 }
@@ -99,8 +117,14 @@ void SecureKVBackend::set(
   const uint8_t* data,
   size_t len,
   AccessControl ac,
-  uint32_t validityWindowSec
+  uint32_t validityWindowSec,
+  const BiometricPromptCopy& prompt
 ) {
+  // The set() path does not show a Keychain prompt itself — provisioning
+  // happens without auth on iOS. The `prompt` argument is accepted for
+  // API symmetry with Android (where biometric set() *does* prompt) and
+  // future iOS variants. Silence the unused-parameter warning.
+  (void)prompt;
   NSData* value = [NSData dataWithBytes:data length:len];
 
   // Overwrite semantics: drop any existing item, then add fresh. We don't
@@ -164,7 +188,8 @@ void SecureKVBackend::set(
 }
 
 std::optional<std::vector<uint8_t>> SecureKVBackend::get(
-  const std::string& key
+  const std::string& key,
+  const BiometricPromptCopy& prompt
 ) {
   // First pass: fetch attributes only. Attribute reads do NOT trigger
   // the biometric prompt; only data reads do. This lets us detect a
@@ -207,6 +232,19 @@ std::optional<std::vector<uint8_t>> SecureKVBackend::get(
       static_cast<uint32_t>(wb[3]);
     LAContext* ctx = contextForRead(nsString(key), windowSec);
     dataQuery[(__bridge id)kSecUseAuthenticationContext] = ctx;
+    // iOS surfaces a single user-visible message in the Keychain
+    // prompt. Prefer subtitle (the equivalent of LAContext.localizedReason
+    // in the standalone biometric API), fall back to title; if both
+    // empty, omit the override and the system default applies.
+    NSString* reason = nil;
+    if (!prompt.subtitle.empty()) reason = nsString(prompt.subtitle);
+    else if (!prompt.title.empty()) reason = nsString(prompt.title);
+    if (reason != nil) {
+      dataQuery[(__bridge id)kSecUseOperationPrompt] = reason;
+    }
+    if (!prompt.cancelLabel.empty()) {
+      ctx.localizedCancelTitle = nsString(prompt.cancelLabel);
+    }
   }
 
   CFTypeRef cfResult = NULL;
@@ -230,10 +268,17 @@ bool SecureKVBackend::has(const std::string& key) {
   NSMutableDictionary* query = [baseQuery(key) mutableCopy];
   query[(__bridge id)kSecReturnData] = @NO;
   query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+  // Suppress UI explicitly. Without this, biometric items can in theory
+  // trigger an authentication prompt during a `has()` lookup. With UISkip,
+  // a biometric item returns errSecInteractionNotAllowed, which we map to
+  // "exists" — has() must never block on user input.
+  query[(__bridge id)kSecUseAuthenticationUI] =
+    (__bridge id)kSecUseAuthenticationUISkip;
 
   OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, NULL);
   if (status == errSecSuccess) return true;
   if (status == errSecItemNotFound) return false;
+  if (status == errSecInteractionNotAllowed) return true;
   throwOSStatus("secureKV.has", status);
 }
 
@@ -292,6 +337,27 @@ bool SecureKVBackend::isHardwareBacked() {
   // is encrypted with a key tied to the Secure Enclave UID — the value is
   // never stored in plaintext on flash.
   return true;
+}
+
+void SecureKVBackend::invalidateSession(const std::string& alias) {
+  // Empty alias = invalidate everything. We must call -invalidate on
+  // each cached LAContext before dropping it so iOS forgets the
+  // outstanding auth, otherwise the auth handle stays live in
+  // SecureEnclaved memory until the LAContext is finally dealloc'd.
+  @synchronized (laContextCache()) {
+    if (alias.empty()) {
+      for (NSString* key in laContextCache().allKeys) {
+        LAContext* ctx = laContextCache()[key];
+        if (ctx != nil) [ctx invalidate];
+      }
+      [laContextCache() removeAllObjects];
+      return;
+    }
+    NSString* key = nsString(alias);
+    LAContext* ctx = laContextCache()[key];
+    if (ctx != nil) [ctx invalidate];
+    [laContextCache() removeObjectForKey:key];
+  }
 }
 
 BiometricStatus SecureKVBackend::biometricStatus() {

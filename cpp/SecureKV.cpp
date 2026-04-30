@@ -1,211 +1,34 @@
 #include "Common.h"
 #include "SecureKVBackend.h"
+#include "SecureKVCommon.h"
 #include "SecureKVSlot.h"
 
 extern "C" {
 #include "memzero.h"
 }
 
+#include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+// SecureKV JSI thunks. Every public method goes through makePromiseAsync
+// (cpp/Common.h): args are validated synchronously on the JS thread,
+// the platform backend call runs on a worker thread, and a finishWork
+// continuation runs back on the JS thread to wrap the result in a
+// jsi::Value. This keeps the JS thread responsive while a Keychain
+// lookup or biometric prompt is in flight.
+//
+// Each thunk wraps its body in safeAsyncThunk(rt, ...) so synchronous
+// jsi::JSError throws from Phase 1 (validation) surface as Promise
+// rejections — without it, callers using `.catch()` instead of
+// `try/await` would miss validation errors.
+
 namespace facebook::react::cryptolib {
 namespace {
 
-constexpr size_t kMaxKeyLen = 128;
 constexpr size_t kMaxValueLen = 65536;  // 64 KiB
-
-// Restrict key names to a portable charset. iOS Keychain stores them as
-// kSecAttrAccount (UTF-8); on Android we hash them into filenames. Allowing
-// arbitrary user input invites collisions, encoding surprises, and
-// path-traversal-style bugs.
-bool isValidKeyChar(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-}
-
-[[noreturn]] void wrap(jsi::Runtime& rt, const char* op, const std::exception& e) {
-  throw jsi::JSError(rt, std::string(op) + ": " + e.what());
-}
-
-// Parses the JS-side accessControl string. The schema is forward-compatible
-// with future variants (e.g. 'biometric_or_passcode') because unknown
-// values are rejected here rather than silently ignored.
-AccessControl parseAccessControl(
-  jsi::Runtime& rt, const char* op, const std::string& s
-) {
-  if (s == "none") return AccessControl::None;
-  if (s == "biometric") return AccessControl::Biometric;
-  throw jsi::JSError(
-    rt, std::string(op) + ": unknown accessControl '" + s + "'");
-}
-
-uint32_t parseValidityWindow(
-  jsi::Runtime& rt,
-  const char* op,
-  const jsi::Value* args,
-  size_t count,
-  size_t index
-) {
-  if (count <= index) return 0;
-  if (args[index].isUndefined() || args[index].isNull()) return 0;
-  if (!args[index].isNumber()) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": validityWindow must be a number");
-  }
-  double v = args[index].asNumber();
-  if (v < 0 || v > static_cast<double>(UINT32_MAX) ||
-      v != static_cast<double>(static_cast<uint32_t>(v))) {
-    throw jsi::JSError(
-      rt, std::string(op) + ": validityWindow must be a non-negative integer");
-  }
-  return static_cast<uint32_t>(v);
-}
-
-void requireValidKey(jsi::Runtime& rt, const char* op, const std::string& key) {
-  if (key.empty() || key.size() > kMaxKeyLen) {
-    throw jsi::JSError(rt, std::string(op) + ": key length out of range");
-  }
-  for (char c : key) {
-    if (!isValidKeyChar(c)) {
-      throw jsi::JSError(
-        rt, std::string(op) + ": key contains invalid character");
-    }
-  }
-}
-
-jsi::Value invoke_set(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    std::string key = requireStringAt(rt, "secure_kv_set", "key", args, count, 0);
-    requireValidKey(rt, "secure_kv_set", key);
-    auto value = requireArrayBufferAt(rt, "secure_kv_set", "value", args, count, 1);
-    size_t len = value.size(rt);
-    if (len > kMaxValueLen) {
-      throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
-    }
-    std::string acStr =
-      requireStringAt(rt, "secure_kv_set", "accessControl", args, count, 2);
-    AccessControl ac = parseAccessControl(rt, "secure_kv_set", acStr);
-    uint32_t window =
-      parseValidityWindow(rt, "secure_kv_set", args, count, 3);
-    auto wrapped = wrapBlobSlot(safeData(rt, value), len);
-    try {
-      SecureKVBackend::set(key, wrapped.data(), wrapped.size(), ac, window);
-    } catch (const std::exception& e) {
-      memzero(wrapped.data(), wrapped.size());
-      wrap(rt, "secure_kv_set", e);
-    }
-    memzero(wrapped.data(), wrapped.size());
-    return jsi::Value::undefined();
-  });
-}
-
-jsi::Value invoke_get(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    std::string key = requireStringAt(rt, "secure_kv_get", "key", args, count, 0);
-    requireValidKey(rt, "secure_kv_get", key);
-    std::optional<std::vector<uint8_t>> result;
-    try {
-      result = SecureKVBackend::get(key);
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_get", e);
-    }
-    if (!result.has_value()) {
-      return jsi::Value::null();
-    }
-    SlotView slot;
-    if (!parseSlot(result->data(), result->size(), slot) ||
-        slot.kind != SlotKind::Blob) {
-      memzero(result->data(), result->size());
-      throw jsi::JSError(
-        rt,
-        std::string("secure_kv_get: slot is ") + slotKindName(slot.kind) +
-          ", expected BLOB"
-      );
-    }
-    std::vector<uint8_t> out(slot.payload, slot.payload + slot.payloadLen);
-    memzero(result->data(), result->size());
-    return wrapDigest(rt, std::move(out));
-  });
-}
-
-jsi::Value invoke_has(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    std::string key = requireStringAt(rt, "secure_kv_has", "key", args, count, 0);
-    requireValidKey(rt, "secure_kv_has", key);
-    try {
-      return jsi::Value(SecureKVBackend::has(key));
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_has", e);
-    }
-  });
-}
-
-jsi::Value invoke_delete(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
-) {
-  return makePromise(rt, [args, count](jsi::Runtime& rt) -> jsi::Value {
-    std::string key =
-      requireStringAt(rt, "secure_kv_delete", "key", args, count, 0);
-    requireValidKey(rt, "secure_kv_delete", key);
-    try {
-      SecureKVBackend::remove(key);
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_delete", e);
-    }
-    return jsi::Value::undefined();
-  });
-}
-
-jsi::Value invoke_list(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
-) {
-  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
-    std::vector<std::string> keys;
-    try {
-      keys = SecureKVBackend::list();
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_list", e);
-    }
-    jsi::Array out(rt, keys.size());
-    for (size_t i = 0; i < keys.size(); ++i) {
-      out.setValueAtIndex(rt, i, jsi::String::createFromUtf8(rt, keys[i]));
-    }
-    return out;
-  });
-}
-
-jsi::Value invoke_clear(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
-) {
-  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
-    try {
-      SecureKVBackend::clear();
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_clear", e);
-    }
-    return jsi::Value::undefined();
-  });
-}
-
-jsi::Value invoke_is_hardware_backed(
-  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
-) {
-  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
-    try {
-      return jsi::Value(SecureKVBackend::isHardwareBacked());
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_is_hardware_backed", e);
-    }
-  });
-}
 
 const char* biometricStatusName(BiometricStatus s) {
   switch (s) {
@@ -219,30 +42,247 @@ const char* biometricStatusName(BiometricStatus s) {
   return "hardware_unavailable";
 }
 
+// --- set ----------------------------------------------------------------
+
+jsi::Value invoke_set(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string key = requireStringAt(rt, "secure_kv_set", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_set", key);
+    auto value = requireArrayBufferAt(rt, "secure_kv_set", "value", args, count, 1);
+    size_t len = value.size(rt);
+    if (len > kMaxValueLen) {
+      throw jsi::JSError(rt, "secure_kv_set: value exceeds 64 KiB limit");
+    }
+    std::string acStr = requireStringAt(rt, "secure_kv_set", "accessControl", args, count, 2);
+    AccessControl ac = parseAccessControl(rt, "secure_kv_set", acStr);
+    uint32_t window = parseValidityWindow(rt, "secure_kv_set", args, count, 3);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, "secure_kv_set", args, count, 4);
+    // Wrap the value into a slot now (on JS thread, where the ArrayBuffer
+    // backing memory is still valid). The slot bytes travel to the worker
+    // thread inside the lambda capture.
+    std::vector<uint8_t> wrapped = wrapBlobSlot(safeData(rt, value), len);
+
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_set",
+      [key = std::move(key), wrapped = std::move(wrapped), ac, window,
+       prompt = std::move(prompt)]() mutable -> bool {
+        try {
+          SecureKVBackend::set(
+            key, wrapped.data(), wrapped.size(), ac, window, prompt);
+        } catch (...) {
+          memzero(wrapped.data(), wrapped.size());
+          throw;
+        }
+        memzero(wrapped.data(), wrapped.size());
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value {
+        return jsi::Value::undefined();
+      }
+    );
+  });
+}
+
+// --- get ----------------------------------------------------------------
+
+jsi::Value invoke_get(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string key = requireStringAt(rt, "secure_kv_get", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_get", key);
+    BiometricPromptCopy prompt = parsePromptCopy(rt, "secure_kv_get", args, count, 1);
+
+    // BgResult: optional<vector> for null-on-missing-key, plus we already
+    // unwrap the slot here so finishWork stays trivial.
+    return makePromiseAsync<std::optional<std::vector<uint8_t>>>(
+      rt, "secure_kv_get",
+      [key = std::move(key), prompt = std::move(prompt)]()
+          -> std::optional<std::vector<uint8_t>> {
+        auto raw = SecureKVBackend::get(key, prompt);
+        if (!raw.has_value()) return std::nullopt;
+        SlotView slot;
+        if (!parseSlot(raw->data(), raw->size(), slot) ||
+            slot.kind != SlotKind::Blob) {
+          std::string kind = slotKindName(slot.kind);
+          memzero(raw->data(), raw->size());
+          throw std::runtime_error("slot is " + kind + ", expected BLOB");
+        }
+        std::vector<uint8_t> out(slot.payload, slot.payload + slot.payloadLen);
+        memzero(raw->data(), raw->size());
+        return out;
+      },
+      [](jsi::Runtime& rt, std::optional<std::vector<uint8_t>>&& bgResult)
+          -> jsi::Value {
+        if (!bgResult.has_value()) return jsi::Value::null();
+        return wrapDigest(rt, std::move(*bgResult));
+      }
+    );
+  });
+}
+
+// --- has ----------------------------------------------------------------
+
+jsi::Value invoke_has(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string key = requireStringAt(rt, "secure_kv_has", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_has", key);
+
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_has",
+      [key = std::move(key)]() -> bool {
+        return SecureKVBackend::has(key);
+      },
+      [](jsi::Runtime&, bool&& v) -> jsi::Value {
+        return jsi::Value(v);
+      }
+    );
+  });
+}
+
+// --- delete -------------------------------------------------------------
+
+jsi::Value invoke_delete(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    std::string key = requireStringAt(rt, "secure_kv_delete", "key", args, count, 0);
+    requireValidKey(rt, "secure_kv_delete", key);
+
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_delete",
+      [key = std::move(key)]() -> bool {
+        SecureKVBackend::remove(key);
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value {
+        return jsi::Value::undefined();
+      }
+    );
+  });
+}
+
+// --- list ---------------------------------------------------------------
+
+jsi::Value invoke_list(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
+) {
+  return safeAsyncThunk(rt, [&] {
+    return makePromiseAsync<std::vector<std::string>>(
+      rt, "secure_kv_list",
+      []() -> std::vector<std::string> {
+        return SecureKVBackend::list();
+      },
+      [](jsi::Runtime& rt, std::vector<std::string>&& keys) -> jsi::Value {
+        jsi::Array out(rt, keys.size());
+        for (size_t i = 0; i < keys.size(); ++i) {
+          out.setValueAtIndex(rt, i, jsi::String::createFromUtf8(rt, keys[i]));
+        }
+        return out;
+      }
+    );
+  });
+}
+
+// --- clear --------------------------------------------------------------
+
+jsi::Value invoke_clear(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
+) {
+  return safeAsyncThunk(rt, [&] {
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_clear",
+      []() -> bool {
+        SecureKVBackend::clear();
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value {
+        return jsi::Value::undefined();
+      }
+    );
+  });
+}
+
+// --- isHardwareBacked ---------------------------------------------------
+
+jsi::Value invoke_is_hardware_backed(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
+) {
+  return safeAsyncThunk(rt, [&] {
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_is_hardware_backed",
+      []() -> bool {
+        return SecureKVBackend::isHardwareBacked();
+      },
+      [](jsi::Runtime&, bool&& v) -> jsi::Value {
+        return jsi::Value(v);
+      }
+    );
+  });
+}
+
+// --- biometricStatus ---------------------------------------------------
+
 jsi::Value invoke_biometric_status(
   jsi::Runtime& rt, TurboModule&, const jsi::Value*, size_t
 ) {
-  return makePromise(rt, [](jsi::Runtime& rt) -> jsi::Value {
-    try {
-      auto s = SecureKVBackend::biometricStatus();
-      return jsi::String::createFromUtf8(rt, biometricStatusName(s));
-    } catch (const std::exception& e) {
-      wrap(rt, "secure_kv_biometric_status", e);
+  return safeAsyncThunk(rt, [&] {
+    return makePromiseAsync<BiometricStatus>(
+      rt, "secure_kv_biometric_status",
+      []() -> BiometricStatus {
+        return SecureKVBackend::biometricStatus();
+      },
+      [](jsi::Runtime& rt, BiometricStatus&& s) -> jsi::Value {
+        return jsi::String::createFromUtf8(rt, biometricStatusName(s));
+      }
+    );
+  });
+}
+
+// --- invalidateSession --------------------------------------------------
+
+jsi::Value invoke_invalidate_session(
+  jsi::Runtime& rt, TurboModule&, const jsi::Value* args, size_t count
+) {
+  return safeAsyncThunk(rt, [&] {
+    // Empty string = invalidate every cached alias. JS validates length
+    // and charset only when an alias was provided, so we don't enforce
+    // requireValidKey on the empty input.
+    std::string alias = requireStringAt(
+      rt, "secure_kv_invalidate_session", "alias", args, count, 0);
+    if (!alias.empty()) {
+      requireValidKey(rt, "secure_kv_invalidate_session", alias);
     }
+
+    return makePromiseAsync<bool>(
+      rt, "secure_kv_invalidate_session",
+      [alias = std::move(alias)]() -> bool {
+        SecureKVBackend::invalidateSession(alias);
+        return true;
+      },
+      [](jsi::Runtime&, bool&&) -> jsi::Value {
+        return jsi::Value::undefined();
+      }
+    );
   });
 }
 
 }  // namespace
 
 void registerSecureKVMethods(MethodMap& map) {
-  map.push_back({"secure_kv_set",                4, invoke_set});
-  map.push_back({"secure_kv_get",                1, invoke_get});
-  map.push_back({"secure_kv_has",                1, invoke_has});
-  map.push_back({"secure_kv_delete",             1, invoke_delete});
-  map.push_back({"secure_kv_list",               0, invoke_list});
-  map.push_back({"secure_kv_clear",              0, invoke_clear});
-  map.push_back({"secure_kv_is_hardware_backed", 0, invoke_is_hardware_backed});
-  map.push_back({"secure_kv_biometric_status",   0, invoke_biometric_status});
+  map.push_back({"secure_kv_set",                 7, invoke_set});
+  map.push_back({"secure_kv_get",                 4, invoke_get});
+  map.push_back({"secure_kv_has",                 1, invoke_has});
+  map.push_back({"secure_kv_delete",              1, invoke_delete});
+  map.push_back({"secure_kv_list",                0, invoke_list});
+  map.push_back({"secure_kv_clear",               0, invoke_clear});
+  map.push_back({"secure_kv_is_hardware_backed",  0, invoke_is_hardware_backed});
+  map.push_back({"secure_kv_biometric_status",    0, invoke_biometric_status});
+  map.push_back({"secure_kv_invalidate_session",  1, invoke_invalidate_session});
 }
 
 }  // namespace facebook::react::cryptolib

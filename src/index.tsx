@@ -1,4 +1,8 @@
-export { CryptoError, SecureKVUnavailableError } from './errors';
+export {
+  CryptoError,
+  SecureKVUnavailableError,
+  BiometricCanceledError,
+} from './errors';
 export { hash } from './hash';
 export { kdf } from './kdf';
 export { mac } from './mac';
@@ -24,6 +28,7 @@ export { secureKV } from './secureKV';
 export type {
   AccessControl,
   AccessControlOptions,
+  BiometricPromptOptions,
   BiometricStatus,
 } from './secureKV';
 export { biometric } from './biometric';

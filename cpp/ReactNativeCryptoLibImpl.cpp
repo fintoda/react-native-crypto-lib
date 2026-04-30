@@ -7,7 +7,11 @@ namespace facebook::react {
 ReactNativeCryptoLibImpl::ReactNativeCryptoLibImpl(
   std::shared_ptr<CallInvoker> jsInvoker
 )
-  : NativeReactNativeCryptoLibCxxSpec(std::move(jsInvoker)) {
+  : NativeReactNativeCryptoLibCxxSpec(jsInvoker) {
+  // Stash the invoker in a process-wide slot so makePromiseAsync()
+  // (cpp/Common.h) can hop back to the JS thread from worker threads
+  // without each MethodFn having to know about the invoker.
+  cryptolib::setGlobalJsInvoker(jsInvoker);
   // Each domain module (Hash, Mac, Kdf, Rng, Ecdsa, Schnorr) owns its own
   // JSI thunks and returns a flat list of (name, argCount, fn) entries.
   // We translate them into TurboModule::MethodMetadata here so the domain

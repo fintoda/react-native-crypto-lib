@@ -1,6 +1,7 @@
 #include <fbjni/fbjni.h>
 
 #include "../../../../cpp/SecureKVBackend.h"
+#include "JniRethrow.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -11,8 +12,8 @@
 // the Kotlin side wraps AndroidKeystore (AES-256-GCM master key) and writes
 // blobs to <filesDir>/secure_kv/. fbjni handles JNIEnv attachment and
 // translates Java exceptions into facebook::jni::JniException, which we
-// remap to std::runtime_error so the JSI thunk layer (cpp/SecureKV.cpp)
-// can wrap it the same way as iOS errors.
+// remap to std::runtime_error via JniRethrow.h so the JSI thunk layer
+// (cpp/SecureKV.cpp) can wrap it the same way as iOS errors.
 
 namespace facebook::react::cryptolib {
 
@@ -22,38 +23,6 @@ namespace {
 constexpr const char* kBridge =
   "com/fintoda/reactnativecryptolib/SecureKVBridge";
 
-// JniException::what() looks like
-//   "com.fintoda.reactnativecryptolib.SecureKVUnavailableException: unavailable: ..."
-//   "com.fintoda.reactnativecryptolib.SecureKVBiometricException: secureKV.set: user canceled: ..."
-// We strip the FQCN prefix so the JS wrapper sees a clean "reason" string
-// it can split on a single ': '. SecureKVUnavailableException keeps the
-// "unavailable: " prefix so errors.ts can upgrade to SecureKVUnavailableError.
-[[noreturn]] void rethrow(const jni::JniException& e) {
-  std::string what = e.what();
-  bool unavailable =
-    what.find("SecureKVUnavailableException") != std::string::npos;
-  bool biometric =
-    what.find("SecureKVBiometricException") != std::string::npos;
-
-  if (unavailable) {
-    size_t cut = what.find("unavailable");
-    if (cut != std::string::npos) {
-      throw std::runtime_error(what.substr(cut));
-    }
-    throw std::runtime_error("unavailable");
-  }
-  if (biometric) {
-    // Strip "com.fintoda...SecureKVBiometricException: " — the Kotlin
-    // message is already self-explanatory ("user canceled: ...").
-    size_t colonSpace = what.find(": ");
-    if (colonSpace != std::string::npos) {
-      throw std::runtime_error(what.substr(colonSpace + 2));
-    }
-    throw std::runtime_error(what);
-  }
-  throw std::runtime_error(what);
-}
-
 }  // namespace
 
 void SecureKVBackend::set(
@@ -61,12 +30,13 @@ void SecureKVBackend::set(
   const uint8_t* data,
   size_t len,
   AccessControl ac,
-  uint32_t validityWindowSec
+  uint32_t validityWindowSec,
+  const BiometricPromptCopy& prompt
 ) {
   try {
     auto cls = jni::findClassStatic(kBridge);
     auto method = cls->getStaticMethod<
-      void(jstring, jbyteArray, jint, jint)
+      void(jstring, jbyteArray, jint, jint, jstring, jstring, jstring)
     >("set");
     auto keyJ = jni::make_jstring(key);
     auto valueJ = jni::JArrayByte::newArray(len);
@@ -76,21 +46,32 @@ void SecureKVBackend::set(
     method(
       cls, keyJ.get(), valueJ.get(),
       static_cast<jint>(ac),
-      static_cast<jint>(validityWindowSec)
+      static_cast<jint>(validityWindowSec),
+      jni::make_jstring(prompt.title).get(),
+      jni::make_jstring(prompt.subtitle).get(),
+      jni::make_jstring(prompt.cancelLabel).get()
     );
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
 std::optional<std::vector<uint8_t>> SecureKVBackend::get(
-  const std::string& key
+  const std::string& key,
+  const BiometricPromptCopy& prompt
 ) {
   try {
     auto cls = jni::findClassStatic(kBridge);
-    auto method = cls->getStaticMethod<jbyteArray(jstring)>("get");
+    auto method = cls->getStaticMethod<
+      jbyteArray(jstring, jstring, jstring, jstring)
+    >("get");
     auto keyJ = jni::make_jstring(key);
-    auto arr = method(cls, keyJ.get());
+    auto arr = method(
+      cls, keyJ.get(),
+      jni::make_jstring(prompt.title).get(),
+      jni::make_jstring(prompt.subtitle).get(),
+      jni::make_jstring(prompt.cancelLabel).get()
+    );
     if (arr == nullptr) return std::nullopt;
     size_t n = arr->size();
     std::vector<uint8_t> out(n);
@@ -99,7 +80,7 @@ std::optional<std::vector<uint8_t>> SecureKVBackend::get(
     }
     return out;
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
@@ -110,7 +91,7 @@ bool SecureKVBackend::has(const std::string& key) {
     auto keyJ = jni::make_jstring(key);
     return method(cls, keyJ.get()) != JNI_FALSE;
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
@@ -121,7 +102,7 @@ void SecureKVBackend::remove(const std::string& key) {
     auto keyJ = jni::make_jstring(key);
     method(cls, keyJ.get());
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
@@ -146,7 +127,7 @@ std::vector<std::string> SecureKVBackend::list() {
     }
     return out;
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
@@ -156,7 +137,7 @@ void SecureKVBackend::clear() {
     auto method = cls->getStaticMethod<void()>("clear");
     method(cls);
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 
@@ -166,8 +147,17 @@ bool SecureKVBackend::isHardwareBacked() {
     auto method = cls->getStaticMethod<jboolean()>("isHardwareBacked");
     return method(cls) != JNI_FALSE;
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
+}
+
+void SecureKVBackend::invalidateSession(const std::string& /*alias*/) {
+  // No-op on Android: the biometric validity window is enforced by
+  // AndroidKeystore at the OS layer and cannot be cleared from
+  // userland. Callers either wait for the window to expire or store
+  // the item with `validityWindow: 0` for per-call prompts. The
+  // method exists so cross-platform code can call it without a
+  // Platform.OS check.
 }
 
 BiometricStatus SecureKVBackend::biometricStatus() {
@@ -185,7 +175,7 @@ BiometricStatus SecureKVBackend::biometricStatus() {
       default: return BiometricStatus::HardwareUnavailable;
     }
   } catch (const jni::JniException& e) {
-    rethrow(e);
+    rethrowJniException(e);
   }
 }
 

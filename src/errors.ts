@@ -34,9 +34,29 @@ export class SecureKVUnavailableError extends CryptoError {
 }
 
 /**
- * Re-shapes a raw native error into a structured `CryptoError` (or
- * `SecureKVUnavailableError` for the secureKV master-key-gone case).
- * Used by both the sync and async wrappers below.
+ * Thrown when the user dismisses a biometric prompt — covers both the
+ * standalone `biometric.authenticate` flow and the secureKV biometric
+ * paths. Distinguished from `CryptoError` so callers can branch on
+ * cancellation without parsing the reason string.
+ *
+ * Native methods report cancellation with a reason of
+ * `"user canceled: <details>"`; this wrapper class catches the prefix.
+ */
+export class BiometricCanceledError extends CryptoError {
+  constructor(fn: string, reason: string) {
+    super(fn, reason);
+    this.name = 'BiometricCanceledError';
+  }
+}
+
+/**
+ * Re-shapes a raw native error into a structured `CryptoError` (or one
+ * of its specialised subclasses). Used by both the sync and async
+ * wrappers below.
+ *
+ * Order matters: cancellation is checked first because it can occur on
+ * both `secure_kv_*` and `biometric_*` functions and would otherwise
+ * fall through to the generic `CryptoError` branch.
  */
 function upgradeNativeError(e: unknown): never {
   const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
@@ -44,6 +64,9 @@ function upgradeNativeError(e: unknown): never {
   if (idx > 0) {
     const nativeFn = msg.slice(0, idx);
     const reason = msg.slice(idx + 2);
+    if (reason.startsWith('user canceled')) {
+      throw new BiometricCanceledError(nativeFn, reason);
+    }
     if (nativeFn.startsWith('secure_kv_') && reason.startsWith('unavailable')) {
       throw new SecureKVUnavailableError(nativeFn, reason);
     }

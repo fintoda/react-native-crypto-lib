@@ -85,7 +85,19 @@ void BiometricBackend::authenticate(
                   dispatch_semaphore_signal(sema);
                 }];
 
-  dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+  // Bound the wait so a stuck UI/OS path can't hang the calling thread
+  // forever. Mirrors the 120s backstop on the Android side
+  // (BIOMETRIC_TIMEOUT_SEC in SecureKVBridge.kt). The OS will normally
+  // dismiss the prompt long before this fires.
+  static const NSTimeInterval kBiometricTimeoutSec = 120;
+  dispatch_time_t deadline = dispatch_time(
+    DISPATCH_TIME_NOW, (int64_t)(kBiometricTimeoutSec * NSEC_PER_SEC));
+  long timedOut = dispatch_semaphore_wait(sema, deadline);
+  if (timedOut != 0) {
+    [ctx invalidate];
+    throw std::runtime_error(
+      "biometric failed: prompt timed out after 120s");
+  }
 
   if (success) return;
 

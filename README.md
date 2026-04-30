@@ -452,14 +452,18 @@ bridge as text. The `secureKV.bip32.*` and `secureKV.raw.*` sub-APIs close
 the loop further: derived / raw private keys never re-enter JS for
 routine signing — see [Native-only signing](#native-only-signing) below.
 
-> ⚠️ **`secureKV` is device-bound storage, not a backup.** Anything you
-> store here is wiped by app uninstall, factory reset, or some OEM
-> screen-lock changes — and is **not** transferable to a new device.
-> Wallet seeds and recovery phrases must be backed up by the user
-> independently (paper, SLIP-39 shares, etc.) before going into
-> `secureKV`. Treat `SecureKVUnavailableError` as "secrets are gone —
-> re-derive from your recovery source." Full details in the
-> [Durability](#durability) section below.
+> ⚠️ **`secureKV` is device-bound storage, not a backup.** Stored values
+> can disappear after factory reset, some OEM screen-lock changes, or
+> (on Android) app uninstall — and are **not** transferable to a new
+> device. **iOS Keychain items, by contrast, persist across app
+> reinstalls** of the same team-ID by default; if you need wipe-on-
+> reinstall semantics on iOS, gate `secureKV.clear()` on a UserDefaults
+> flag (UserDefaults *is* wiped on uninstall). Wallet seeds and recovery
+> phrases must be backed up by the user independently (paper, SLIP-39
+> shares, etc.) before going into `secureKV`. Treat
+> `SecureKVUnavailableError` as "secrets are gone — re-derive from your
+> recovery source." Full details in the [Durability](#durability)
+> section below.
 
 ```ts
 import {
@@ -581,12 +585,18 @@ their own biometric." Subsequent reads will fail with
 **Android.** Requires API 28+ (`BiometricPrompt`). The biometric master
 key uses `setInvalidatedByBiometricEnrollment(true)`, mirroring the iOS
 behaviour: re-enrolling biometrics drops the key. On API 30+ the gate
-is `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)` (Class 3
-biometric only, no PIN/pattern fallback). On API 28-29 the equivalent
-is `setUserAuthenticationValidityDurationSeconds(-1)`, which counts any
-device-unlock as auth at the Keystore layer; the BiometricPrompt at our
-call site still constrains the actual prompt to biometrics. Devices on
-API < 28 reject `accessControl: 'biometric'` with a clear error.
+is `setUserAuthenticationParameters(window, AUTH_BIOMETRIC_STRONG)`
+(Class 3 biometric only, no PIN/pattern fallback) and `validityWindow`
+behaves as documented. On API 28-29 the equivalent
+`setUserAuthenticationValidityDurationSeconds` would count any
+device-unlock (including PIN/pattern) as auth at the Keystore layer,
+weakening biometric-only enforcement; the library therefore silently
+**downgrades any `validityWindow > 0` to 0 on these APIs** (logged once
+per process via `Log.w("secureKV", ...)`). The resulting behaviour is
+identical to `validityWindow: 0` everywhere — every operation prompts
+fresh, via a CryptoObject-bound `BiometricPrompt` that is strictly
+biometric. Devices on API < 28 reject `accessControl: 'biometric'` with
+a clear error.
 
 > **Android host-app setup:** the host's `MainActivity` must inherit
 > from `FragmentActivity` (RN's `ReactActivity` already does, via
@@ -595,6 +605,15 @@ API < 28 reject `accessControl: 'biometric'` with a clear error.
 > apps, but if you have a custom `getPackages()`, include it manually.
 > The package eagerly registers a small companion module that hands
 > the current `Activity` to `BiometricPrompt`.
+>
+> **Avoid `android:process=` overrides** on Activities or other
+> components that touch `secureKV`: the bridge enforces a single-process
+> file lock and a wrongly-scoped second process will fail fast with an
+> `IllegalStateException`. Reflection into `ActivityThread.mActivities`
+> serves as a fallback when RN hasn't yet bound the `ReactApplicationContext`,
+> but it relies on a hidden API that Google may close on future Android
+> releases. The eager `SecureKVActivityHolder` companion is the
+> first-class path; reflection is best-effort only.
 
 **Session window.** Pair `'biometric'` with `validityWindow: N`
 (seconds) to authorise N seconds of subsequent reads after one prompt.
@@ -892,8 +911,15 @@ the answer as informational.
 
 Do not store anything here that you need to survive these events:
 
-- **Uninstalling the app** wipes all stored values (file directory and
-  Keystore alias / Keychain items are removed by the OS).
+- **Uninstalling the app** — *platform-specific*:
+  - **Android**: wipes all stored values (filesDir is cleared and
+    Keystore aliases scoped to the package are removed by the OS).
+  - **iOS**: Keychain items **persist** across reinstalls of the same
+    team-ID (Apple's documented behavior since iOS 10.3). If you need
+    wipe-on-reinstall semantics, set a flag in `NSUserDefaults` /
+    `AsyncStorage` on first run and call `secureKV.clear()` when the
+    flag is missing — `NSUserDefaults` *is* cleared on uninstall, so
+    its absence reliably signals "fresh install".
 - **Factory reset** invalidates the master key. Old blobs become
   permanently undecryptable.
 - **Restoring to a new device** does not migrate the store. Both
